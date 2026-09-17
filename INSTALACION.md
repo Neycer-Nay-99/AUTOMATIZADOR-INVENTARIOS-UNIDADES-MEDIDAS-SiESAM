@@ -51,25 +51,11 @@ Si te dice algo como `Python 3.11.x`, ya lo tienes. Si te da error o no lo recon
    ```powershell
    pip install -r requirements.txt
    ```
-   Esto instala `pandas` y `openpyxl` (obligatorias) y `pillow`, `pytesseract`, `opencv-python` (opcionales, solo para leer inventarios desde fotos).
+   Esto instala `pandas` y `openpyxl`, las únicas librerías necesarias.
 
 ---
 
-## Paso 4 — (Opcional) Instalar Tesseract OCR
-
-Solo necesario si vas a cargar inventarios **desde fotos/imágenes**. Si solo usarás Excel, CSV, TXT o texto pegado, puedes saltar este paso.
-
-1. Descarga el instalador desde: `https://github.com/UB-Mannheim/tesseract/wiki`
-2. Durante la instalación, marca el paquete de idioma **Spanish**.
-3. Verifica que quedó instalado correctamente:
-   ```powershell
-   tesseract --version
-   ```
-   Si no lo reconoce, revisa que la carpeta de instalación de Tesseract haya quedado agregada al PATH del sistema (el instalador normalmente lo hace automáticamente).
-
----
-
-## Paso 5 — Ejecutar la aplicación
+## Paso 4 — Ejecutar la aplicación
 
 Ya no necesitas PowerShell para uso diario. Simplemente:
 
@@ -89,7 +75,6 @@ Esto abre la ventana de la aplicación. Para aprender a usarla, revisa **`MANUAL
 | `ModuleNotFoundError: No module named 'pandas'` | No se activó el entorno virtual antes de instalar, o faltó ejecutar `pip install -r requirements.txt` (Paso 3) |
 | La ventana no abre al hacer doble clic en `lanzar.bat` | Abre PowerShell, entra a la carpeta del proyecto y ejecuta `python main.py` directamente para ver el mensaje de error exacto |
 | No se puede activar el entorno virtual (error de "scripts deshabilitados") | Ejecuta `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` en PowerShell (Paso 3, punto 4) |
-| OCR no funciona / "Instale pillow y pytesseract" | Verifica que instalaste las librerías opcionales (Paso 3) y Tesseract OCR (Paso 4) |
 
 ---
 
