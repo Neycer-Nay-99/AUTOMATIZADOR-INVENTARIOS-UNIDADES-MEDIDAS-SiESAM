@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Automatizador de Inventarios — SI ESAM  v1.2
-Convierte cualquier inventario (Excel, CSV o TXT) al formato oficial.
+Convierte cualquier inventario (Excel o CSV) al formato oficial.
 CATEGORIAS, MARCAS y UBICACION se construyen dinámicamente desde los datos de entrada.
 UNIDADES es una lista fija completa (SIN, Bolivia).
 Si el origen trae columnas Unidad/Factor, se generan además UNIDAD_MEDIDA y
@@ -203,6 +203,26 @@ UNIDADES_EXPORT_COLS = ["ID", "DESCRIPCION"]
 UNIDAD_MEDIDA_COLS = ["id", "unidad_id", "descripcion", "factor", "estado", "created_at", "updated_at"]
 PRODUCTOS_UM_COLS = ["id", "producto_id", "unidad_medida_id", "precio_unitario", "orden", "calcular_precio"]
 
+# Campos mostrados en el panel "Columnas detectadas en este archivo" de la
+# GUI: (etiqueta visible, clave del dict que devuelve detect_columns()).
+_DETECT_FIELDS = [
+    ("Código/SKU",             "codigo"),
+    ("Nombre/Descripción",     "nombre"),
+    ("Precio",                 "precio"),
+    ("Costo",                  "costo"),
+    ("Marca",                  "marca"),
+    ("Categoría",              "categoria"),
+    ("Subcategoría",           "subcategoria"),
+    ("Cantidad",               "cantidad"),
+    ("Ubicación",              "ubicacion"),
+    ("Unidad (presentación)",  "unidad"),
+    ("Factor",                 "factor"),
+    ("Lote",                   "lote"),
+    ("Vencimiento",            "vencimiento"),
+    ("Principio Activo",       "principio_activo"),
+    ("Registro Sanitario",     "registro_sanitario"),
+]
+
 # ─── Tabla dinámica ───────────────────────────────────────────────────────────
 
 class DynamicTable:
@@ -374,50 +394,6 @@ class UnidadMedidaTable:
 
 # ─── Extracción de datos ──────────────────────────────────────────────────────
 
-_PRICE_RE = [
-    r"(?:bs\.?|bolivianos?)[:\s]*(\d+(?:[.,]\d{1,2})?)",
-    r"(\d+(?:[.,]\d{1,2})?)\s*(?:bs\.?|bolivianos?)",
-    r"[-–:;,\t]\s*(\d+(?:[.,]\d{1,2})?)\s*$",
-    r"\s(\d{1,6}(?:\.\d{1,2})?)\s*$",
-]
-
-
-def _parse_line(line: str) -> tuple[str, float]:
-    for pat in _PRICE_RE:
-        m = re.search(pat, line, re.IGNORECASE)
-        if m:
-            try:
-                price = float(m.group(1).replace(",", "."))
-                name  = line[: m.start()].strip()
-                name  = re.sub(r"[-–:;,]\s*$", "", name).strip()
-                return name, price
-            except ValueError:
-                pass
-    return line.strip(), 0.0
-
-
-def extract_from_text(raw: str) -> list[dict]:
-    products = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line or len(line) < 2:
-            continue
-        name, price = _parse_line(line)
-        if name:
-            products.append({
-                "descripcion":    name.upper(),
-                "precio":         price,
-                "cantidad":       1,
-                "marca_text":     "",
-                "categoria_text": "",
-                "subcategoria_text": "",
-                "ubicacion_text": "",
-                "lote_origen":    "",
-                "vencimiento_origen": "",
-            })
-    return products
-
-
 # Heurística de columnas para Excel / CSV
 _COL_NAME  = ["nombre", "producto", "descripcion", "descripción", "item",
                "articulo", "artículo", "name", "product"]
@@ -447,24 +423,56 @@ _COL_FACTOR = ["factor", "conversion", "conversión", "equivalencia", "multiplic
 _COL_LOTE  = ["lote", "lot", "batch"]
 _COL_VENCIMIENTO = ["vencimiento", "caducidad", "expiracion", "expiración",
                       "expiry", "expiration"]
+_COL_PRINCIPIO_ACTIVO = ["principio activo", "principio-activo", "active ingredient"]
+_COL_REGISTRO_SANITARIO = ["registro sanitario", "reg. sanitario", "reg sanitario",
+                             "registro san"]
 
 # Formatos aceptados para la fecha de vencimiento en el origen (además de
 # fechas ya parseadas por pandas como datetime/Timestamp)
 _FECHA_FORMATS = ["%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%Y-%m-%d", "%Y/%m/%d"]
+
+# Punto de partida de los números de serie de fecha de Excel. Cuando una
+# celda de fecha usa un formato de número que openpyxl no reconoce como
+# fecha (o la columna mezcla texto y fechas), pandas la lee como el número
+# de serie crudo (ej. 46609.0) en vez de convertirla a datetime.
+_EXCEL_EPOCH = datetime.date(1899, 12, 30)
+
+
+def _excel_serial_a_fecha(serial: float) -> str | None:
+    """Convierte un número de serie de fecha de Excel a AAAA-MM-DD, o None
+    si el número no cae en un rango razonable de fechas (~1900-2173)."""
+    if not (1 <= serial <= 100000):
+        return None
+    try:
+        return (_EXCEL_EPOCH + datetime.timedelta(days=serial)).strftime("%Y-%m-%d")
+    except (OverflowError, ValueError):
+        return None
 
 
 def _format_fecha(val, log=None, contexto: str = "") -> str:
     """
     Normaliza una fecha de vencimiento al formato de salida YYYY-MM-DD.
     Acepta datetime/Timestamp (lo que suele devolver pandas al leer una
-    celda de fecha de Excel) o texto en DD-MM-YYYY / DD/MM/YYYY / etc.
+    celda de fecha de Excel), texto en DD-MM-YYYY / DD/MM/YYYY / etc., o un
+    número de serie de fecha de Excel crudo (ver _EXCEL_EPOCH arriba).
     """
     if val is None:
         return ""
+    # pd.NaT (celda de fecha vacía) pasa isinstance(val, datetime.datetime)
+    # como True, pero no soporta strftime — hay que descartarlo antes.
+    try:
+        if pd is not None and pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
     if isinstance(val, datetime.datetime):
         return val.strftime("%Y-%m-%d")
     if isinstance(val, datetime.date):
         return val.strftime("%Y-%m-%d")
+    if isinstance(val, (int, float)):
+        fecha = _excel_serial_a_fecha(val)
+        if fecha:
+            return fecha
     text = str(val).strip()
     if not text or text.lower() in ("nan", "none", "nat"):
         return ""
@@ -473,6 +481,14 @@ def _format_fecha(val, log=None, contexto: str = "") -> str:
             return datetime.datetime.strptime(text, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
+    # Algunos orígenes guardan el número de serie como texto (ej. "46609.0")
+    # en vez de como fecha real, dependiendo de cómo se leyó la columna.
+    try:
+        fecha = _excel_serial_a_fecha(float(text))
+        if fecha:
+            return fecha
+    except ValueError:
+        pass
     if log:
         log(f"  ATENCION: fecha de vencimiento '{text}'{contexto} no reconocida "
             f"— se deja tal cual vino.", "warn")
@@ -498,7 +514,14 @@ def _safe_str(val) -> str:
     return "" if s.lower() in ("nan", "none", "") else s
 
 
-def df_to_products(df, log=None) -> list[dict]:
+def detect_columns(df) -> dict[str, str | None]:
+    """
+    Detecta la columna de origen para cada campo destino, usando las mismas
+    heurísticas por palabra clave que usa df_to_products. Se reutiliza tanto
+    para la extracción real como para mostrarle al usuario, apenas selecciona
+    el archivo, qué columna se va a usar para cada campo (sin tener que
+    convertir primero).
+    """
     # "descripcion corta" se busca antes que el nombre y se excluye de esa
     # búsqueda, porque también matchea la keyword "descripcion" de _COL_NAME
     # (mismo patrón que exist_min/exist_max con "existencia")
@@ -537,7 +560,6 @@ def df_to_products(df, log=None) -> list[dict]:
     # (ej. archivos DUNAMIS con filas de continuación CAJA/DOCENA/etc.)
     col_factor = _find_col(df, _COL_FACTOR)
     col_unidad = _find_col(df, _COL_UNIDAD, exclude={col_qty} if col_qty else None)
-    has_multi_unit = col_unidad is not None and col_factor is not None
 
     code_cols = _find_cols(df, _COL_CODE)
     col_code  = code_cols[0] if code_cols else None
@@ -545,6 +567,8 @@ def df_to_products(df, log=None) -> list[dict]:
 
     col_lote = _find_col(df, _COL_LOTE)
     col_vencimiento = _find_col(df, _COL_VENCIMIENTO)
+    col_principio_activo = _find_col(df, _COL_PRINCIPIO_ACTIVO)
+    col_registro_sanitario = _find_col(df, _COL_REGISTRO_SANITARIO)
 
     if col_name is None:
         for c in df.columns:
@@ -552,13 +576,51 @@ def df_to_products(df, log=None) -> list[dict]:
                 col_name = c
                 break
 
+    return {
+        "nombre": col_name, "precio": col_price, "precio_alt": col_price_alt,
+        "costo": col_cost, "marca": col_brand, "categoria": col_cat,
+        "subcategoria": col_subcat, "cantidad": col_qty,
+        "exist_min": col_exist_min, "exist_max": col_exist_max,
+        "ubicacion": col_ubic, "codigo": col_code, "codigo_item": col_code2,
+        "desc_corta": col_desc_short, "unidad": col_unidad, "factor": col_factor,
+        "lote": col_lote, "vencimiento": col_vencimiento,
+        "principio_activo": col_principio_activo,
+        "registro_sanitario": col_registro_sanitario,
+    }
+
+
+def df_to_products(df, log=None) -> list[dict]:
+    cols = detect_columns(df)
+    col_name        = cols["nombre"]
+    col_price       = cols["precio"]
+    col_price_alt   = cols["precio_alt"]
+    col_cost        = cols["costo"]
+    col_brand       = cols["marca"]
+    col_cat         = cols["categoria"]
+    col_subcat      = cols["subcategoria"]
+    col_qty         = cols["cantidad"]
+    col_exist_min   = cols["exist_min"]
+    col_exist_max   = cols["exist_max"]
+    col_ubic        = cols["ubicacion"]
+    col_code        = cols["codigo"]
+    col_code2       = cols["codigo_item"]
+    col_desc_short  = cols["desc_corta"]
+    col_unidad      = cols["unidad"]
+    col_factor      = cols["factor"]
+    col_lote        = cols["lote"]
+    col_vencimiento = cols["vencimiento"]
+    col_principio_activo   = cols["principio_activo"]
+    col_registro_sanitario = cols["registro_sanitario"]
+    has_multi_unit  = col_unidad is not None and col_factor is not None
+
     if log:
         log(f"  nombre={col_name}  precio={col_price}  precio_alt={col_price_alt}  costo={col_cost}  "
             f"marca={col_brand}  cat={col_cat}  subcat={col_subcat}  qty={col_qty}  "
             f"exist_min={col_exist_min}  exist_max={col_exist_max}  "
             f"ubic={col_ubic}  codigo={col_code}  codigo_item={col_code2}  "
             f"desc_corta={col_desc_short}  unidad={col_unidad}  factor={col_factor}  "
-            f"lote={col_lote}  vencimiento={col_vencimiento}")
+            f"lote={col_lote}  vencimiento={col_vencimiento}  "
+            f"principio_activo={col_principio_activo}  registro_sanitario={col_registro_sanitario}")
 
     products: list[dict] = []
     last_product: dict | None = None
@@ -603,6 +665,8 @@ def df_to_products(df, log=None) -> list[dict]:
                 "lote_origen":    _safe_str(row[col_lote]) if col_lote else "",
                 "vencimiento_origen": _format_fecha(row[col_vencimiento], log=log,
                                         contexto=f" en '{name.upper()}'") if col_vencimiento else "",
+                "principio_activo_origen": _safe_str(row[col_principio_activo]) if col_principio_activo else "",
+                "registro_sanitario_origen": _safe_str(row[col_registro_sanitario]) if col_registro_sanitario else "",
                 "unidades_alternas": [],
             }
             products.append(product)
@@ -661,6 +725,37 @@ def extract_from_csv(path: str, log=None) -> list[dict]:
         except Exception:
             pass
     return []
+
+
+def peek_columns(path: str) -> dict[str, str | None] | None:
+    """
+    Lee solo un puñado de filas del archivo (sin procesar todo el inventario)
+    para detectar qué columna de origen matchea cada campo destino. Se usa
+    para mostrarle al usuario la detección apenas selecciona el archivo,
+    antes de convertir. Devuelve None si el archivo no se pudo leer o no
+    tiene columnas útiles.
+    """
+    ext = Path(path).suffix.lower()
+    try:
+        if ext in (".xlsx", ".xls"):
+            xl = pd.ExcelFile(path)
+            for sheet in xl.sheet_names:
+                df = pd.read_excel(xl, sheet_name=sheet, nrows=20)
+                if not df.empty:
+                    return detect_columns(df)
+            return None
+        elif ext == ".csv":
+            for sep in (",", ";", "\t", "|"):
+                try:
+                    df = pd.read_csv(path, sep=sep, encoding="utf-8", errors="ignore", nrows=20)
+                    if len(df.columns) > 1:
+                        return detect_columns(df)
+                except Exception:
+                    pass
+            return None
+        return None
+    except Exception:
+        return None
 
 
 # ─── Constructor de hojas oficiales ──────────────────────────────────────────
@@ -738,8 +833,8 @@ def build_sheets(
             "updated_at":         "",
             "slug":               "",
             "descripcion_corta":  (p.get("descripcion_corta_origen") or "").strip(),
-            "principio_activo":   "",
-            "registro_sanitario": "",
+            "principio_activo":   (p.get("principio_activo_origen") or "").strip(),
+            "registro_sanitario": (p.get("registro_sanitario_origen") or "").strip(),
             "venta_controlada":   0,
             "existencia_minima":  p.get("existencia_minima", 0),
             "tipo":               "",
@@ -923,14 +1018,14 @@ class App(tk.Tk):
         tk.Label(fr, text="CONVERTIDOR DE INVENTARIOS PARA SI ESAM",
                  bg="#1F4E79", fg="white", font=("Segoe UI", 16, "bold")).pack()
         tk.Label(fr,
-                 text="Convierte Excel · CSV · TXT  →  Formato oficial SI ESAM",
+                 text="Convierte Excel · CSV  →  Formato oficial SI ESAM",
                  bg="#1F4E79", fg="#BDD7EE", font=("Segoe UI", 9)).pack()
 
     def _build_left(self, parent) -> ttk.LabelFrame:
         lf = ttk.LabelFrame(parent, text="  Entrada de datos  ", padding=10)
 
         ttk.Label(lf,
-                  text="Archivo de inventario (Excel, CSV o TXT):"
+                  text="Archivo de inventario (Excel o CSV):"
                   ).pack(anchor=tk.W)
         row = ttk.Frame(lf)
         row.pack(fill=tk.X, pady=(4, 2))
@@ -942,7 +1037,43 @@ class App(tk.Tk):
         ttk.Button(row, text="✗", width=3,
                    command=self._clear_file).pack(side=tk.LEFT)
 
+        ttk.Separator(lf, orient="horizontal").pack(fill=tk.X, pady=(10, 8))
+
+        ttk.Label(lf, text="Columnas detectadas en este archivo:",
+                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+
+        det_fr = ttk.Frame(lf)
+        det_fr.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+
+        cols_det = ("Campo", "Columna detectada")
+        self._tree_detect = ttk.Treeview(det_fr, columns=cols_det, show="headings",
+                                          height=len(_DETECT_FIELDS))
+        self._tree_detect.heading("Campo", text="Campo")
+        self._tree_detect.heading("Columna detectada", text="Columna detectada")
+        self._tree_detect.column("Campo", width=150, anchor="w")
+        self._tree_detect.column("Columna detectada", width=200, anchor="w")
+        self._tree_detect.tag_configure("missing", foreground="#B00020")
+        sb_det = ttk.Scrollbar(det_fr, orient=tk.VERTICAL, command=self._tree_detect.yview)
+        self._tree_detect.configure(yscrollcommand=sb_det.set)
+        self._tree_detect.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb_det.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._populate_detected_columns(None)
+
         return lf
+
+    def _populate_detected_columns(self, cols: dict[str, str | None] | None):
+        self._tree_detect.delete(*self._tree_detect.get_children())
+        for label, key in _DETECT_FIELDS:
+            if cols is None:
+                self._tree_detect.insert("", tk.END, values=(label, "—"))
+            else:
+                found = cols.get(key)
+                if found:
+                    self._tree_detect.insert("", tk.END, values=(label, found))
+                else:
+                    self._tree_detect.insert("", tk.END, values=(label, "(no detectada)"),
+                                              tags=("missing",))
 
     def _build_right(self, parent) -> ttk.Frame:
         fr = ttk.Frame(parent)
@@ -1033,10 +1164,9 @@ class App(tk.Tk):
         path = filedialog.askopenfilename(
             title="Seleccionar archivo de inventario",
             filetypes=[
-                ("Todos los soportados", "*.xlsx *.xls *.csv *.txt"),
+                ("Todos los soportados", "*.xlsx *.xls *.csv"),
                 ("Excel",  "*.xlsx *.xls"),
                 ("CSV",    "*.csv"),
-                ("Texto",  "*.txt"),
                 ("Todos",  "*.*"),
             ],
         )
@@ -1044,10 +1174,15 @@ class App(tk.Tk):
             self._input_file = path
             self._file_var.set(Path(path).name)
             self._log(f"Archivo: {path}")
+            cols = peek_columns(path) if PANDAS_OK else None
+            self._populate_detected_columns(cols)
+            if cols is None:
+                self._log("No se pudieron detectar columnas (archivo vacío o ilegible).", "warn")
 
     def _clear_file(self):
         self._input_file = None
         self._file_var.set("Sin archivo seleccionado")
+        self._populate_detected_columns(None)
 
     # ── Ver información del sistema ───────────────────────────────────────────
 
@@ -1072,7 +1207,8 @@ class App(tk.Tk):
             ("Código/SKU",         "codigo, código, cod, sku, item_code, item code, product_code, code, codebar, barcode "
                                     "(si hay 2 columnas que matchean, la 1ra va a 'codigo' y la 2da a 'codigo_item')"),
             ("Nombre/Descripción", "nombre, producto, descripcion, item, articulo, name, product"),
-            ("Precio",             "precio, price, costo, cost, valor, pvp, tarifa, importe, monto"),
+            ("Precio",             "precio, price, valor, pvp, tarifa, importe, monto, venta"),
+            ("Costo",              "costo, cost, compra"),
             ("Marca",              "marca, brand, fabricante"),
             ("Categoría",          "categoria, category, tipo, grupo, familia, family"),
             ("Subcategoría",       "subcategoria, sub categoria, sub-categoria, subcategory "
@@ -1080,12 +1216,18 @@ class App(tk.Tk):
                                     "queda vinculado a la subcategoría)"),
             ("Cantidad",           "cantidad, qty, stock, existencia, quantity, unidades"),
             ("Ubicación",          "ubicacion, location, sede, almacen, bodega, deposito"),
+            ("Unidad (presentación)", "unidad, presentacion, presentación, empaque "
+                                    "(junto con Factor, arma UNIDAD_MEDIDA para presentaciones "
+                                    "alternas como caja, docena, etc.)"),
+            ("Factor",             "factor, conversion, conversión, equivalencia, multiplicador"),
             ("Lote",               "lote, lot, batch"),
             ("Vencimiento",        "vencimiento, caducidad, expiracion, expiración, expiry, expiration "
                                     "(acepta DD-MM-AAAA, DD/MM/AAAA o fecha de Excel; se exporta como AAAA-MM-DD)"),
+            ("Principio Activo",   "principio activo, principio-activo, active ingredient"),
+            ("Registro Sanitario", "registro sanitario, reg. sanitario, reg sanitario, registro san"),
         ]
         cols_h = ("Campo destino", "Palabras clave detectadas en el encabezado")
-        tree_c = ttk.Treeview(tab_cols, columns=cols_h, show="headings", height=10)
+        tree_c = ttk.Treeview(tab_cols, columns=cols_h, show="headings", height=12)
         tree_c.heading(cols_h[0], text=cols_h[0])
         tree_c.heading(cols_h[1], text=cols_h[1])
         tree_c.column(cols_h[0], width=160)
@@ -1161,11 +1303,6 @@ class App(tk.Tk):
                     products += extract_from_excel(self._input_file, log=self._log)
                 elif ext == ".csv":
                     products += extract_from_csv(self._input_file, log=self._log)
-                elif ext == ".txt":
-                    raw = Path(self._input_file).read_text(encoding="utf-8", errors="ignore")
-                    tp  = extract_from_text(raw)
-                    self._log(f"TXT: {len(tp)} productos.")
-                    products += tp
                 else:
                     self._log(f"Formato '{ext}' no soportado.", "warn")
             except Exception as exc:
@@ -1272,9 +1409,9 @@ class App(tk.Tk):
         fr = ttk.Frame(win, padding=(8, 4, 8, 0))
         fr.pack(fill=tk.BOTH, expand=True)
 
-        cols    = ("#", "Código", "Descripción", "Precio (Bs)", "Marca", "Categoría", "Cant.", "Unid. Alt.")
-        widths  = [38, 90, 260, 88, 110, 100, 55, 70]
-        anchors = ["center", "center", "w", "center", "w", "w", "center", "center"]
+        cols    = ("#", "Código", "Descripción", "Precio (Bs)", "Costo (Bs)", "Marca", "Categoría", "Cant.", "Unid. Alt.")
+        widths  = [38, 90, 240, 88, 88, 110, 100, 55, 70]
+        anchors = ["center", "center", "w", "center", "center", "w", "w", "center", "center"]
 
         tree = ttk.Treeview(fr, columns=cols, show="headings", height=14)
         for c, w, a in zip(cols, widths, anchors):
@@ -1293,6 +1430,7 @@ class App(tk.Tk):
                 p.get("codigo_origen") or "(auto)",
                 p.get("descripcion", ""),
                 f"{p.get('precio', 0):.2f}",
+                f"{p.get('costo', 0):.2f}",
                 brand_name,
                 cat_name,
                 p.get("cantidad", 1),

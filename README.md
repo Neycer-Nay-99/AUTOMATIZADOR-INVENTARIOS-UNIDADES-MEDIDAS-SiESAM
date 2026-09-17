@@ -1,6 +1,6 @@
 # Automatizador de Inventarios — SI ESAM v2.0
 
-Convierte cualquier inventario (Excel, CSV o TXT) al formato oficial de SI ESAM.  
+Convierte cualquier inventario (Excel o CSV) al formato oficial de SI ESAM.  
 Las hojas **CATEGORIA**, **MARCA** y **UBICACIONES** se construyen automáticamente desde los datos de entrada.  
 La hoja **UNIDADES** es siempre la lista fija oficial del SIN Bolivia (124 unidades).
 
@@ -35,22 +35,11 @@ python main.py
 
 | Paso | Acción |
 |------|--------|
-| 1 | Seleccionar un archivo Excel / CSV / TXT |
+| 1 | Seleccionar un archivo Excel / CSV |
 | 2 | Ajustar opciones: código inicial, sede ID, unidad ID |
 | 3 | Clic en **CONVERTIR INVENTARIO** |
 | 4 | Revisar la previsualización y confirmar |
 | 5 | Elegir dónde guardar el Excel resultante |
-
----
-
-## Formatos de texto aceptados (archivo TXT)
-
-```
-LAVADORA 10KG PANASONIC - Bs 6500
-REFRIGERADOR 2P SHARP: 5200
-MICROONDAS TOSHIBA 30L; 850
-TELEVISOR HITACHI 55 PULGADAS  4800
-```
 
 ---
 
