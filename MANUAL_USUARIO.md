@@ -1,6 +1,6 @@
 # Manual de Usuario — Automatizador de Inventarios SI ESAM
 
-Guía rápida para convertir cualquier inventario (Excel, CSV, TXT, texto pegado o foto) al formato oficial de SI ESAM, sin necesidad de tocar código.
+Guía rápida para convertir cualquier inventario (Excel, CSV o TXT) al formato oficial de SI ESAM, sin necesidad de tocar código.
 
 ---
 
@@ -15,23 +15,19 @@ Se abre la ventana **"CONVERTIDOR DE INVENTARIOS PARA SI ESAM"**, dividida en do
 
 ---
 
-## 2. Cargar el inventario (elige una opción)
+## 2. Cargar el inventario
 
-### Opción A — Archivo
 1. Clic en **"Examinar…"**.
-2. Selecciona tu archivo: Excel (`.xlsx`/`.xls`), CSV, TXT, o una imagen (`.jpg`, `.png`, `.bmp`).
+2. Selecciona tu archivo: Excel (`.xlsx`/`.xls`), CSV o TXT.
 3. El nombre del archivo aparece en el cuadro junto al botón. Si te equivocaste, usa el botón **"✗"** para quitarlo.
 
-### Opción B — Pegar texto
-En el cuadro de texto grande (parte 2 del panel izquierdo), pega tu inventario **una línea por producto**, en alguno de estos formatos:
+Si tu archivo es TXT, cada línea representa un producto, en alguno de estos formatos:
 ```
 LAVADORA 10KG PANASONIC - Bs 6500
 REFRIGERADOR 2P SHARP: 5200
 MICROONDAS TOSHIBA 30L; 850
 ```
-> Nota: con texto pegado o fotos, la app no puede detectar cantidad ni costo por separado — solo nombre y precio.
-
-Puedes usar **archivo Y texto pegado a la vez**; la app junta los productos de ambas fuentes.
+> Nota: con un archivo TXT, la app no puede detectar cantidad ni costo por separado — solo nombre y precio.
 
 ---
 
@@ -94,10 +90,9 @@ El archivo generado trae 8 hojas, listas para importar al sistema SI ESAM:
 
 | Problema | Qué revisar |
 |----------|-------------|
-| "No se encontraron productos" | Verifica que el archivo tenga una columna con nombre reconocible (ver "ℹ Ver columnas detectables") o que el texto pegado tenga el formato correcto |
+| "No se encontraron productos" | Verifica que el archivo tenga una columna con nombre reconocible (ver "ℹ Ver columnas detectables"), o que el archivo TXT tenga el formato correcto |
 | El precio o costo salió mal / la utilidad da 0 | Es probable que dos columnas de tu Excel compartan una palabra clave (ej. "Precio Compra" y "Precio Venta" ambas contienen "precio"). Revisa el Registro: muestra exactamente qué columna detectó como `precio=` y `costo=` |
 | La app no abre / error de dependencias | Sigue las instrucciones de instalación en `README.md` |
-| OCR de imágenes no funciona | Necesitas instalar Tesseract OCR — ver `README.md` |
 
 ---
 

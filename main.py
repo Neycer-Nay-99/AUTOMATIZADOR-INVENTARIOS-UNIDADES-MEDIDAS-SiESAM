@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Automatizador de Inventarios — SI ESAM  v1.2
-Convierte cualquier inventario (Excel, CSV, TXT o imagen) al formato oficial.
+Convierte cualquier inventario (Excel, CSV o TXT) al formato oficial.
 CATEGORIAS, MARCAS y UBICACION se construyen dinámicamente desde los datos de entrada.
 UNIDADES es una lista fija completa (SIN, Bolivia).
 Si el origen trae columnas Unidad/Factor, se generan además UNIDAD_MEDIDA y
@@ -36,22 +36,6 @@ try:
 except ImportError:
     OPENPYXL_OK = False
     Font = PatternFill = Alignment = None  # type: ignore
-
-try:
-    from PIL import Image
-    import pytesseract
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-    PIL_OK = True
-except ImportError:
-    PIL_OK = False
-
-try:
-    import cv2
-    import numpy as np
-    CV2_OK = True
-except ImportError:
-    CV2_OK = False
-    np = None  # type: ignore
 
 # ─── UNIDADES — lista fija completa (SIN Bolivia) ────────────────────────────
 UNIDADES_REF: list[dict] = [
@@ -218,14 +202,6 @@ UBICACION_COLS = ["id", "descripcion", "color"]
 UNIDADES_EXPORT_COLS = ["ID", "DESCRIPCION"]
 UNIDAD_MEDIDA_COLS = ["id", "unidad_id", "descripcion", "factor", "estado", "created_at", "updated_at"]
 PRODUCTOS_UM_COLS = ["id", "producto_id", "unidad_medida_id", "precio_unitario", "orden", "calcular_precio"]
-
-PLACEHOLDER = (
-    "Ejemplo (uno por línea):\n"
-    "LAVADORA 10KG PANASONIC NA-VG1000L - Bs 6500\n"
-    "REFRIGERADOR 2P SHARP SJ-PT547NS - 5200\n"
-    "MICROONDAS TOSHIBA 30L: 850\n"
-    "TELEVISOR HITACHI 55 PULGADAS 4K; 4800"
-)
 
 # ─── Tabla dinámica ───────────────────────────────────────────────────────────
 
@@ -645,39 +621,6 @@ def extract_from_csv(path: str, log=None) -> list[dict]:
     return []
 
 
-def extract_from_image(path: str, log=None) -> list[dict]:
-    if not PIL_OK:
-        if log:
-            log("ERROR: Instale pillow y pytesseract para OCR.")
-        return []
-    try:
-        img = Image.open(path).convert("L")
-        if CV2_OK:
-            arr = np.array(img)
-            arr = cv2.equalizeHist(arr)
-            _, arr = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            h, w = arr.shape
-            scale = max(1, 2000 // max(h, w, 1))
-            if scale > 1:
-                arr = cv2.resize(arr, (w * scale, h * scale),
-                                 interpolation=cv2.INTER_CUBIC)
-            img = Image.fromarray(arr)
-            if log:
-                log("Imagen preprocesada con OpenCV.")
-        try:
-            text = pytesseract.image_to_string(
-                img, lang="spa+eng", config="--oem 3 --psm 6")
-        except Exception:
-            text = pytesseract.image_to_string(img, config="--oem 3 --psm 6")
-        if log:
-            log(f"OCR: {len(text)} caracteres extraidos.")
-        return extract_from_text(text)
-    except Exception as e:
-        if log:
-            log(f"Error OCR: {e}")
-        return []
-
-
 # ─── Constructor de hojas oficiales ──────────────────────────────────────────
 
 def build_sheets(
@@ -904,7 +847,6 @@ class App(tk.Tk):
         self.minsize(820, 560)
         self.configure(bg="#F0F4F8")
         self._input_file: str | None = None
-        self._placeholder_active = True
         self._build_ui()
         self._log("Sistema iniciado  (v1.2).")
         self._check_deps()
@@ -939,14 +881,14 @@ class App(tk.Tk):
         tk.Label(fr, text="CONVERTIDOR DE INVENTARIOS PARA SI ESAM",
                  bg="#1F4E79", fg="white", font=("Segoe UI", 16, "bold")).pack()
         tk.Label(fr,
-                 text="Convierte Excel · CSV · TXT · Imagen  →  Formato oficial SI ESAM",
+                 text="Convierte Excel · CSV · TXT  →  Formato oficial SI ESAM",
                  bg="#1F4E79", fg="#BDD7EE", font=("Segoe UI", 9)).pack()
 
     def _build_left(self, parent) -> ttk.LabelFrame:
         lf = ttk.LabelFrame(parent, text="  Entrada de datos  ", padding=10)
 
         ttk.Label(lf,
-                  text="1.  Archivo de inventario (Excel, CSV, TXT o imagen JPG/PNG):"
+                  text="Archivo de inventario (Excel, CSV o TXT):"
                   ).pack(anchor=tk.W)
         row = ttk.Frame(lf)
         row.pack(fill=tk.X, pady=(4, 2))
@@ -957,23 +899,6 @@ class App(tk.Tk):
                    command=self._pick_file).pack(side=tk.LEFT, padx=(6, 2))
         ttk.Button(row, text="✗", width=3,
                    command=self._clear_file).pack(side=tk.LEFT)
-
-        ttk.Separator(lf, orient="horizontal").pack(fill=tk.X, pady=10)
-
-        ttk.Label(lf,
-                  text="2.  O pegar inventario en texto plano (uno por línea):"
-                  ).pack(anchor=tk.W)
-        ttk.Label(lf,
-                  text='      Formatos: "Producto - Bs 99"  |  "Producto: 99"  |  "Producto; 99"',
-                  foreground="#666666", font=("Segoe UI", 8)).pack(anchor=tk.W)
-
-        self._txt = ScrolledText(lf, height=16, font=("Consolas", 10),
-                                  wrap=tk.WORD, relief="solid", bd=1)
-        self._txt.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
-        self._txt.insert("1.0", PLACEHOLDER)
-        self._txt.config(fg="#999999")
-        self._txt.bind("<FocusIn>",  self._txt_focus_in)
-        self._txt.bind("<FocusOut>", self._txt_focus_out)
 
         return lf
 
@@ -1059,34 +984,17 @@ class App(tk.Tk):
             self._log("FALTA: pandas  →  pip install pandas", "err")
         if not OPENPYXL_OK:
             self._log("FALTA: openpyxl  →  pip install openpyxl", "err")
-        if not PIL_OK:
-            self._log("OCR desactivado  →  pip install pillow pytesseract", "warn")
-        if not CV2_OK and PIL_OK:
-            self._log("Pre-proc. imagen desactivado  →  pip install opencv-python", "warn")
         if PANDAS_OK and OPENPYXL_OK:
             self._log("Dependencias principales OK.", "ok")
-
-    def _txt_focus_in(self, _):
-        if self._placeholder_active:
-            self._txt.delete("1.0", tk.END)
-            self._txt.config(fg="black")
-            self._placeholder_active = False
-
-    def _txt_focus_out(self, _):
-        if not self._txt.get("1.0", tk.END).strip():
-            self._txt.insert("1.0", PLACEHOLDER)
-            self._txt.config(fg="#999999")
-            self._placeholder_active = True
 
     def _pick_file(self):
         path = filedialog.askopenfilename(
             title="Seleccionar archivo de inventario",
             filetypes=[
-                ("Todos los soportados", "*.xlsx *.xls *.csv *.txt *.jpg *.jpeg *.png *.bmp"),
+                ("Todos los soportados", "*.xlsx *.xls *.csv *.txt"),
                 ("Excel",  "*.xlsx *.xls"),
                 ("CSV",    "*.csv"),
                 ("Texto",  "*.txt"),
-                ("Imagen", "*.jpg *.jpeg *.png *.bmp"),
                 ("Todos",  "*.*"),
             ],
         )
@@ -1213,25 +1121,16 @@ class App(tk.Tk):
                     tp  = extract_from_text(raw)
                     self._log(f"TXT: {len(tp)} productos.")
                     products += tp
-                elif ext in (".jpg", ".jpeg", ".png", ".bmp"):
-                    products += extract_from_image(self._input_file, log=self._log)
                 else:
                     self._log(f"Formato '{ext}' no soportado.", "warn")
             except Exception as exc:
                 self._log(f"Error leyendo archivo: {exc}", "err")
                 traceback.print_exc()
 
-        if not self._placeholder_active:
-            raw = self._txt.get("1.0", tk.END).strip()
-            if raw:
-                tp = extract_from_text(raw)
-                self._log(f"Texto pegado: {len(tp)} productos.")
-                products += tp
-
         if not products:
             messagebox.showwarning("Sin datos",
                 "No se encontraron productos.\n\n"
-                "Verifique el archivo seleccionado o el texto pegado.")
+                "Verifique el archivo seleccionado.")
             self._set_status("Sin datos extraídos.")
             return
 

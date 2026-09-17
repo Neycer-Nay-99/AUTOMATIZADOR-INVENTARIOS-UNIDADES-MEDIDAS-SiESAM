@@ -1,6 +1,6 @@
 # Automatizador de Inventarios — SI ESAM v2.0
 
-Convierte cualquier inventario (Excel, CSV, TXT o imagen) al formato oficial de SI ESAM.  
+Convierte cualquier inventario (Excel, CSV o TXT) al formato oficial de SI ESAM.  
 Las hojas **CATEGORIA**, **MARCA** y **UBICACIONES** se construyen automáticamente desde los datos de entrada.  
 La hoja **UNIDADES** es siempre la lista fija oficial del SIN Bolivia (124 unidades).
 
@@ -18,20 +18,9 @@ La hoja **UNIDADES** es siempre la lista fija oficial del SIN Bolivia (124 unida
 python -m venv venv
 .\venv\Scripts\activate
 pip install pandas openpyxl
-
-# Opcional: para leer imágenes con OCR
-pip install pillow pytesseract opencv-python
 ```
 
-### 2. Instalar Tesseract OCR (solo si usará imágenes)
-
-- Descargar el instalador de Windows desde:  
-  `https://github.com/UB-Mannheim/tesseract/wiki`
-- Durante la instalación, marcar el paquete de idioma **Spanish**.
-- Asegurarse de que `tesseract` quede en el PATH del sistema.
-- Verificar con: `tesseract --version`
-
-### 3. Ejecutar la aplicación
+### 2. Ejecutar la aplicación
 
 **Doble clic** en `lanzar.bat`  
 _(o desde PowerShell)_:
@@ -46,7 +35,7 @@ python main.py
 
 | Paso | Acción |
 |------|--------|
-| 1 | Seleccionar un archivo Excel / CSV / TXT / imagen **o** pegar el inventario en el área de texto |
+| 1 | Seleccionar un archivo Excel / CSV / TXT |
 | 2 | Ajustar opciones: código inicial, sede ID, unidad ID |
 | 3 | Clic en **CONVERTIR INVENTARIO** |
 | 4 | Revisar la previsualización y confirmar |
@@ -54,7 +43,7 @@ python main.py
 
 ---
 
-## Formatos de texto aceptados (TXT o área de pegado)
+## Formatos de texto aceptados (archivo TXT)
 
 ```
 LAVADORA 10KG PANASONIC - Bs 6500
@@ -148,6 +137,4 @@ KNOWN_BRANDS: list[str] = [
 | Problema | Solución |
 |----------|----------|
 | `ModuleNotFoundError: pandas` | `pip install pandas openpyxl` |
-| OCR no funciona | Instalar Tesseract OCR y agregar al PATH |
 | Columna de precio no detectada | Renombrar la columna a "precio" o "costo" en el Excel de entrada |
-| Caracteres extraños en OCR | Usar OpenCV: `pip install opencv-python` para preprocesar la imagen |
