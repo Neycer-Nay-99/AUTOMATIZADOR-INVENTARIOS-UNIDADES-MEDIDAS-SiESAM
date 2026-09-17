@@ -257,6 +257,29 @@ class DynamicTable:
     def count(self) -> int:
         return len(self._rows)
 
+
+class CategoriaTable(DynamicTable):
+    """
+    DynamicTable con jerarquía de 2 niveles (categoria_padre_id), igual a como
+    la hoja CATEGORIA la soporta en el ERP de SI ESAM: una categoría "padre"
+    (sin padre propio) y, opcionalmente, una "hija" (subcategoría) que apunta
+    a esa categoría padre vía categoria_padre_id. El producto siempre queda
+    vinculado al nivel más específico disponible (la hija si existe).
+
+    La deduplicación sigue siendo global por nombre (case-insensitive), sin
+    distinguir bajo qué padre está: si el mismo nombre aparece como hija de
+    dos padres distintos, se reutiliza la primera fila creada.
+    """
+
+    def get_or_add_hija(self, text: str, padre_id: int) -> int:
+        if not text or not text.strip():
+            return 1
+        before = len(self._rows)
+        new_id = self.get_or_add(text)
+        if len(self._rows) > before:
+            self._rows[-1]["categoria_padre_id"] = padre_id
+        return new_id
+
 # ─── Utilidades ───────────────────────────────────────────────────────────────
 
 def now_str() -> str:
@@ -411,6 +434,7 @@ def extract_from_text(raw: str) -> list[dict]:
                 "cantidad":       1,
                 "marca_text":     "",
                 "categoria_text": "",
+                "subcategoria_text": "",
                 "ubicacion_text": "",
             })
     return products
@@ -424,6 +448,8 @@ _COL_COST  = ["costo", "cost", "compra"]
 _COL_BRAND = ["marca", "brand", "fabricante"]
 _COL_CAT   = ["categoria", "categoría", "category", "tipo", "grupo",
                "familia", "family"]
+_COL_SUBCAT = ["subcategoria", "subcategoría", "sub categoria", "sub categoría",
+                "sub-categoria", "sub-categoría", "subcategory", "sub category"]
 _COL_QTY   = ["cantidad", "qty", "stock", "existencia", "quantity", "unidades"]
 _COL_EXIST_MIN = ["existencia minima", "existencia mínima", "exist minima",
                    "exist mínima", "stock minimo", "stock mínimo",
@@ -479,7 +505,11 @@ def df_to_products(df, log=None) -> list[dict]:
     col_price = _price_cols[0] if _price_cols else None
     col_price_alt = _price_cols[1] if len(_price_cols) > 1 else col_price
     col_brand = _find_col(df, _COL_BRAND)
-    col_cat   = _find_col(df, _COL_CAT)
+    # "subcategoria" se busca antes que "categoria" y se excluye de esa
+    # búsqueda, porque también matchea la keyword "categoria" de _COL_CAT
+    # (mismo patrón que desc_corta/nombre y exist_min/exist_max)
+    col_subcat = _find_col(df, _COL_SUBCAT)
+    col_cat    = _find_col(df, _COL_CAT, exclude={col_subcat} if col_subcat else None)
     # min/max se buscan antes que la cantidad normal, y se excluyen de esa
     # búsqueda, porque "existencia minima/maxima" también matchea la keyword
     # "existencia" de _COL_QTY
@@ -510,7 +540,7 @@ def df_to_products(df, log=None) -> list[dict]:
 
     if log:
         log(f"  nombre={col_name}  precio={col_price}  precio_alt={col_price_alt}  costo={col_cost}  "
-            f"marca={col_brand}  cat={col_cat}  qty={col_qty}  "
+            f"marca={col_brand}  cat={col_cat}  subcat={col_subcat}  qty={col_qty}  "
             f"exist_min={col_exist_min}  exist_max={col_exist_max}  "
             f"ubic={col_ubic}  codigo={col_code}  codigo_item={col_code2}  "
             f"desc_corta={col_desc_short}  unidad={col_unidad}  factor={col_factor}")
@@ -549,6 +579,7 @@ def df_to_products(df, log=None) -> list[dict]:
                 "existencia_maxima": max(exist_max, 0),
                 "marca_text":     _safe_str(row[col_brand]).upper() if col_brand else "",
                 "categoria_text": _safe_str(row[col_cat]).upper()   if col_cat   else "",
+                "subcategoria_text": _safe_str(row[col_subcat]).upper() if col_subcat else "",
                 "ubicacion_text": _safe_str(row[col_ubic]).upper()  if col_ubic  else "",
                 "codigo_origen":  _safe_str(row[col_code])          if col_code  else "",
                 "codigo_item_origen": _safe_str(row[col_code2])     if col_code2 else "",
@@ -661,7 +692,7 @@ def build_sheets(
     UNIDADES es fija (UNIDADES_REF). UNIDAD_MEDIDA y PRODUCTOS_UNIDADES_MEDIDAS se
     generan solo si los productos traen presentaciones alternas (unidades_alternas).
     """
-    cat_tbl  = DynamicTable()
+    cat_tbl  = CategoriaTable()
     brand_tbl = DynamicTable()
     ubic_tbl  = DynamicTable()
     unit_tbl  = UnidadMedidaTable()
@@ -676,11 +707,16 @@ def build_sheets(
         cant   = max(p.get("cantidad", 1), 0)
 
         brand_name, cat_name = _resolve_brand_cat(p)
+        subcat_name = (p.get("subcategoria_text") or "").strip().upper()
 
         # Ubicación: usar columna explícita si existe, sino GENERAL
         ubic_text = (p.get("ubicacion_text") or "").strip().upper()
 
-        c_id = cat_tbl.get_or_add(cat_name)    if cat_name  != "GENERAL" else 1
+        if subcat_name and subcat_name != "GENERAL":
+            padre_id = cat_tbl.get_or_add(cat_name) if cat_name != "GENERAL" else 1
+            c_id = cat_tbl.get_or_add_hija(subcat_name, padre_id)
+        else:
+            c_id = cat_tbl.get_or_add(cat_name) if cat_name != "GENERAL" else 1
         m_id = brand_tbl.get_or_add(brand_name) if brand_name != "GENERAL" else 1
         u_id = ubic_tbl.get_or_add(ubic_text)   if ubic_text              else 1
 
@@ -794,7 +830,7 @@ def build_sheets(
     # Construir DataFrames de referencia desde las tablas dinámicas
     cats = [
         {"id": r["id"], "descripcion": r["descripcion"],
-         "categoria_padre_id": "",
+         "categoria_padre_id": r.get("categoria_padre_id", ""),
          "slug": "",
          "descripcion_larga": "", "descripcion_corta": "", "es_para_menu": 0}
         for r in cat_tbl.items()
@@ -1089,6 +1125,9 @@ class App(tk.Tk):
             ("Precio",             "precio, price, costo, cost, valor, pvp, tarifa, importe, monto"),
             ("Marca",              "marca, brand, fabricante"),
             ("Categoría",          "categoria, category, tipo, grupo, familia, family"),
+            ("Subcategoría",       "subcategoria, sub categoria, sub-categoria, subcategory "
+                                    "(si existe, se crea como hija de Categoría y el producto "
+                                    "queda vinculado a la subcategoría)"),
             ("Cantidad",           "cantidad, qty, stock, existencia, quantity, unidades"),
             ("Ubicación",          "ubicacion, location, sede, almacen, bodega, deposito"),
         ]
