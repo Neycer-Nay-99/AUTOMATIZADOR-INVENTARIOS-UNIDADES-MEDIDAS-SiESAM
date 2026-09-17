@@ -12,3 +12,8 @@ __pycache__/
 
 # Salidas generadas por la app
 *_SI_ESAM.xlsx
+
+# Artefactos de build de PyInstaller (se regeneran con build_exe.bat)
+build/
+dist/
+*.spec

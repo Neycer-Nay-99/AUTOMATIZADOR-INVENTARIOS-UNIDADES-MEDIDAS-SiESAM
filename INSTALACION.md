@@ -67,6 +67,25 @@ Esto abre la ventana de la aplicación. Para aprender a usarla, revisa **`MANUAL
 
 ---
 
+## Opción alternativa — Generar un ejecutable (.exe) para usar en otras PC sin instalar Python
+
+Si necesitás correr la app en otra computadora sin repetir los pasos 1-3 (instalar Python, crear entorno virtual, etc.), podés generar un `.exe` standalone que funciona con doble clic en cualquier PC con Windows, sin instalar nada.
+
+**En la PC donde ya tenés el proyecto instalado (pasos 1-3 ya hechos):**
+
+1. Doble clic en **`build_exe.bat`**.
+2. Esperá unos minutos — instala `PyInstaller` y genera el ejecutable.
+3. El resultado queda en `dist\AutomatizadorInventariosSIESAM.exe`.
+
+**Para usarlo en otra PC:** copiá solo ese archivo `.exe` (no hace falta copiar el resto del proyecto) y hacé doble clic — se abre la misma aplicación, sin necesidad de instalar Python ni ninguna librería.
+
+> Notas:
+> - El `.exe` pesa varios MB (~90 MB) porque incluye Python y todas las librerías (pandas, openpyxl) empaquetadas adentro — es normal.
+> - Cada vez que se modifique `main.py`, hay que volver a correr `build_exe.bat` para regenerar el `.exe` con los cambios.
+> - El primer arranque del `.exe` puede tardar unos segundos más que `lanzar.bat` (tiene que descomprimirse en memoria); los siguientes arranques son más rápidos.
+
+---
+
 ## Problemas comunes
 
 | Problema | Solución |
