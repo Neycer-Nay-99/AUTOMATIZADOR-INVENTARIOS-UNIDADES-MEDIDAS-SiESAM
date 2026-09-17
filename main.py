@@ -412,6 +412,8 @@ def extract_from_text(raw: str) -> list[dict]:
                 "categoria_text": "",
                 "subcategoria_text": "",
                 "ubicacion_text": "",
+                "lote_origen":    "",
+                "vencimiento_origen": "",
             })
     return products
 
@@ -442,6 +444,39 @@ _COL_CODE  = ["codigo", "código", "cod", "sku", "item_code", "item code",
                "product_code", "code", "codebar", "barcode"]
 _COL_UNIDAD = ["unidad", "presentacion", "presentación", "empaque"]
 _COL_FACTOR = ["factor", "conversion", "conversión", "equivalencia", "multiplicador"]
+_COL_LOTE  = ["lote", "lot", "batch"]
+_COL_VENCIMIENTO = ["vencimiento", "caducidad", "expiracion", "expiración",
+                      "expiry", "expiration"]
+
+# Formatos aceptados para la fecha de vencimiento en el origen (además de
+# fechas ya parseadas por pandas como datetime/Timestamp)
+_FECHA_FORMATS = ["%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%Y-%m-%d", "%Y/%m/%d"]
+
+
+def _format_fecha(val, log=None, contexto: str = "") -> str:
+    """
+    Normaliza una fecha de vencimiento al formato de salida YYYY-MM-DD.
+    Acepta datetime/Timestamp (lo que suele devolver pandas al leer una
+    celda de fecha de Excel) o texto en DD-MM-YYYY / DD/MM/YYYY / etc.
+    """
+    if val is None:
+        return ""
+    if isinstance(val, datetime.datetime):
+        return val.strftime("%Y-%m-%d")
+    if isinstance(val, datetime.date):
+        return val.strftime("%Y-%m-%d")
+    text = str(val).strip()
+    if not text or text.lower() in ("nan", "none", "nat"):
+        return ""
+    for fmt in _FECHA_FORMATS:
+        try:
+            return datetime.datetime.strptime(text, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    if log:
+        log(f"  ATENCION: fecha de vencimiento '{text}'{contexto} no reconocida "
+            f"— se deja tal cual vino.", "warn")
+    return text
 
 
 def _find_col(df, keywords: list[str], exclude: set | None = None) -> str | None:
@@ -508,6 +543,9 @@ def df_to_products(df, log=None) -> list[dict]:
     col_code  = code_cols[0] if code_cols else None
     col_code2 = code_cols[1] if len(code_cols) > 1 else None
 
+    col_lote = _find_col(df, _COL_LOTE)
+    col_vencimiento = _find_col(df, _COL_VENCIMIENTO)
+
     if col_name is None:
         for c in df.columns:
             if df[c].dtype == object:
@@ -519,7 +557,8 @@ def df_to_products(df, log=None) -> list[dict]:
             f"marca={col_brand}  cat={col_cat}  subcat={col_subcat}  qty={col_qty}  "
             f"exist_min={col_exist_min}  exist_max={col_exist_max}  "
             f"ubic={col_ubic}  codigo={col_code}  codigo_item={col_code2}  "
-            f"desc_corta={col_desc_short}  unidad={col_unidad}  factor={col_factor}")
+            f"desc_corta={col_desc_short}  unidad={col_unidad}  factor={col_factor}  "
+            f"lote={col_lote}  vencimiento={col_vencimiento}")
 
     products: list[dict] = []
     last_product: dict | None = None
@@ -561,6 +600,9 @@ def df_to_products(df, log=None) -> list[dict]:
                 "codigo_item_origen": _safe_str(row[col_code2])     if col_code2 else "",
                 "descripcion_corta_origen": _safe_str(row[col_desc_short]) if col_desc_short else "",
                 "unidad_texto":   _safe_str(row[col_unidad]) if col_unidad else "",
+                "lote_origen":    _safe_str(row[col_lote]) if col_lote else "",
+                "vencimiento_origen": _format_fecha(row[col_vencimiento], log=log,
+                                        contexto=f" en '{name.upper()}'") if col_vencimiento else "",
                 "unidades_alternas": [],
             }
             products.append(product)
@@ -754,8 +796,8 @@ def build_sheets(
             "costo":       costo,
             "created_at":  "",
             "updated_at":  "",
-            "lote":        "",
-            "vencimiento": "",
+            "lote":        (p.get("lote_origen") or "").strip(),
+            "vencimiento": (p.get("vencimiento_origen") or "").strip(),
         })
 
         # Presentaciones alternas del producto (hoja PRODUCTOS_UNIDADES_MEDIDAS)
@@ -1038,6 +1080,9 @@ class App(tk.Tk):
                                     "queda vinculado a la subcategoría)"),
             ("Cantidad",           "cantidad, qty, stock, existencia, quantity, unidades"),
             ("Ubicación",          "ubicacion, location, sede, almacen, bodega, deposito"),
+            ("Lote",               "lote, lot, batch"),
+            ("Vencimiento",        "vencimiento, caducidad, expiracion, expiración, expiry, expiration "
+                                    "(acepta DD-MM-AAAA, DD/MM/AAAA o fecha de Excel; se exporta como AAAA-MM-DD)"),
         ]
         cols_h = ("Campo destino", "Palabras clave detectadas en el encabezado")
         tree_c = ttk.Treeview(tab_cols, columns=cols_h, show="headings", height=10)
