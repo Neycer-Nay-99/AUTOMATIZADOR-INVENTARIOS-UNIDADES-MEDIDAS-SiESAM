@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Automatizador de Inventarios — SI ESAM  v1.1
+Automatizador de Inventarios — SI ESAM  v1.2
 Convierte cualquier inventario (Excel, CSV, TXT o imagen) al formato oficial.
-CATEGORIA, MARCA y UBICACIONES se construyen dinámicamente desde los datos de entrada.
+CATEGORIAS, MARCAS y UBICACION se construyen dinámicamente desde los datos de entrada.
 UNIDADES es una lista fija completa (SIN, Bolivia).
+Si el origen trae columnas Unidad/Factor, se generan además UNIDAD_MEDIDA y
+PRODUCTOS_UNIDADES_MEDIDAS para presentaciones alternas (caja, docena, etc.).
 Código de producto: se extrae del origen si existe la columna, si no se genera incremental.
 """
 from __future__ import annotations
@@ -188,8 +190,34 @@ CLIENTE_PROV_COLS = [
 
 SHEET_ORDER = [
     "CLIENTE PROVEEDORES", "PRODUCTOS", "PRODUCTOS DETALLES",
-    "PRODUCTO SEDES", "UNIDADES", "CATEGORIA", "MARCA", "UBICACIONES",
+    "PRODUCTO SEDES", "UNIDADES", "UNIDAD_MEDIDA", "PRODUCTOS_UNIDADES_MEDIDAS",
+    "CATEGORIAS", "MARCAS", "UBICACION",
 ]
+
+# ─── Orden de columnas de exportación (debe igualar la plantilla oficial) ────
+PRODUCTOS_COLS = [
+    "id", "descripcion", "codigo", "codigo_actividad", "unidad_id", "imagen", "estado",
+    "es_servicio", "categoria_id", "marca_id", "ubicacion_id", "descripcion_larga", "codigo_sin",
+    "created_at", "updated_at", "slug", "descripcion_corta", "principio_activo", "registro_sanitario",
+    "venta_controlada", "existencia_minima", "novedoso", "tipo", "codigo_item", "codigo_volvo",
+    "codigo_linea", "es_bonificado", "existencia_maxima", "config_adicionales", "medidas",
+]
+PRODUCTO_SEDES_COLS = [
+    "id", "producto_id", "costo", "sede_id", "precio_unitario", "esta_activo",
+    "cantidad", "utilidad", "factor", "precio_unitario2", "cantidad2", "precio_unitario3", "cantidad3",
+    "precio_unitario4", "cantidad4", "utilidad2", "utilidad3", "utilidad4", "precio_factura",
+    "utilidad_factura", "aplicar_lista_precios", "calcular_cantidad_por_precio",
+    "mostrar_en_ecommerce", "es_alquilable", "tarifa_alquiler",
+]
+CATEGORIAS_COLS = [
+    "id", "descripcion", "categoria_padre_id", "slug", "descripcion_larga",
+    "descripcion_corta", "es_para_menu",
+]
+MARCAS_COLS = ["id", "descripcion", "slug"]
+UBICACION_COLS = ["id", "descripcion", "color"]
+UNIDADES_EXPORT_COLS = ["ID", "DESCRIPCION"]
+UNIDAD_MEDIDA_COLS = ["id", "unidad_id", "descripcion", "factor", "estado", "created_at", "updated_at"]
+PRODUCTOS_UM_COLS = ["id", "producto_id", "unidad_medida_id", "precio_unitario", "orden", "calcular_precio"]
 
 PLACEHOLDER = (
     "Ejemplo (uno por línea):\n"
@@ -259,6 +287,92 @@ def _resolve_brand_cat(p: dict) -> tuple[str, str]:
     return brand_name, cat_name
 
 
+# ─── Resolución de unidad de medida por palabra clave ────────────────────────
+
+_UNIT_KEYWORD_RULES: list[tuple[re.Pattern, int]] = [
+    (re.compile(r"\bCUARTA\b"), 14),   # DOCENA — 1/4 de docena
+    (re.compile(r"\bDOCENA\b"), 14),   # también matchea "MEDIA DOCENA"
+    (re.compile(r"\bCAJA\b"), 6),      # también matchea "MEDIA CAJA"
+    (re.compile(r"\bGRUESA\b"), 18),
+    (re.compile(r"\bPAQ"), 42),        # PAQUETE / PAQ / PAQ.
+    (re.compile(r"\bFARDO\b"), 15),
+    (re.compile(r"\bBOLSA\b"), 4),
+    (re.compile(r"\bMILLAR"), 38),     # MILLAR / MILLARES
+    (re.compile(r"\bBULTO\b"), 66),
+    (re.compile(r"\bDISPLAY\b"), 65),
+    (re.compile(r"\bCARTON"), 7),      # CARTON / CARTONES
+    (re.compile(r"\b(SET|JUEGO)\b"), 21),
+    (re.compile(r"\bUNIDAD"), 57),     # respaldo genérico antes de OTRO
+]
+_UNIT_FALLBACK_ID = 62  # OTRO
+
+
+def _normalize_unit_text(text: str) -> str:
+    s = (text or "").strip().lower()
+    for chars, repl in [
+        ("áàäâ", "a"), ("éèëê", "e"),
+        ("íìïî", "i"), ("óòöô", "o"),
+        ("úùüû", "u"), ("ñ", "n"),
+    ]:
+        for c in chars:
+            s = s.replace(c, repl)
+    return s.upper()
+
+
+def resolve_unidad_id(text: str, default: int = _UNIT_FALLBACK_ID) -> int:
+    """
+    Resuelve el id de UNIDADES_REF que corresponde a un texto libre de unidad
+    (p.ej. "CAJA (24DOC)", "MEDIA DOCENA", "CUARTA") por palabra clave.
+    Si no hay match, devuelve `default` (OTRO por defecto).
+    """
+    t = _normalize_unit_text(text)
+    if not t:
+        return default
+    for pattern, uid in _UNIT_KEYWORD_RULES:
+        if pattern.search(t):
+            return uid
+    return default
+
+
+def _format_factor(factor: float) -> str:
+    """Formatea el factor sin decimales sobrantes: 20.0 -> '20', 2.5 -> '2.5'."""
+    f = float(factor or 0)
+    if f == int(f):
+        return str(int(f))
+    return str(f).rstrip("0").rstrip(".")
+
+
+class UnidadMedidaTable:
+    """
+    Catálogo deduplicado de presentaciones alternas (hoja UNIDAD_MEDIDA):
+    una fila por combinación única (descripcion, factor). A diferencia de
+    DynamicTable, empieza vacío (sin fila semilla) y cada fila lleva además
+    su propio unidad_id resuelto por palabra clave.
+    """
+
+    def __init__(self):
+        self._rows: list[dict] = []
+        self._idx: dict[tuple[str, float], int] = {}
+
+    def get_or_add(self, descripcion: str, factor: float) -> int:
+        desc = (descripcion or "").strip().upper()
+        key = (desc, round(float(factor or 0), 6))
+        if key in self._idx:
+            return self._idx[key]
+        new_id = len(self._rows) + 1
+        self._rows.append({
+            "id": new_id,
+            "unidad_id": resolve_unidad_id(desc),
+            "descripcion": f"{desc} X{_format_factor(factor)}",
+            "factor": factor,
+        })
+        self._idx[key] = new_id
+        return new_id
+
+    def items(self) -> list[dict]:
+        return list(self._rows)
+
+
 # ─── Extracción de datos ──────────────────────────────────────────────────────
 
 _PRICE_RE = [
@@ -324,6 +438,8 @@ _COL_DESC_SHORT = ["descripcion corta", "descripción corta", "desc corta",
                      "short description", "short desc"]
 _COL_CODE  = ["codigo", "código", "cod", "sku", "item_code", "item code",
                "product_code", "code", "codebar", "barcode"]
+_COL_UNIDAD = ["unidad", "presentacion", "presentación", "empaque"]
+_COL_FACTOR = ["factor", "conversion", "conversión", "equivalencia", "multiplicador"]
 
 
 def _find_col(df, keywords: list[str], exclude: set | None = None) -> str | None:
@@ -355,8 +471,13 @@ def df_to_products(df, log=None) -> list[dict]:
     col_cost  = _find_col(df, _COL_COST)
     # el precio de venta se busca excluyendo la columna ya asignada a costo,
     # para evitar que "PRECIO COMPRA" (que también matchea "precio") se
-    # confunda con "PRECIO VENTA"
-    col_price = _find_col(df, _COL_PRICE, exclude={col_cost} if col_cost else None)
+    # confunda con "PRECIO VENTA".
+    # Algunos orígenes (ej. DUNAMIS) traen una segunda columna "PRECIO" después
+    # de FACTOR, dedicada al precio de las filas de continuación (presentación
+    # alterna): esa segunda columna se guarda aparte como col_price_alt.
+    _price_cols = [c for c in _find_cols(df, _COL_PRICE) if c != col_cost]
+    col_price = _price_cols[0] if _price_cols else None
+    col_price_alt = _price_cols[1] if len(_price_cols) > 1 else col_price
     col_brand = _find_col(df, _COL_BRAND)
     col_cat   = _find_col(df, _COL_CAT)
     # min/max se buscan antes que la cantidad normal, y se excluyen de esa
@@ -371,6 +492,12 @@ def df_to_products(df, log=None) -> list[dict]:
     )
     col_ubic  = _find_col(df, _COL_UBIC)
 
+    # unidad/factor: columnas opcionales para presentaciones alternas
+    # (ej. archivos DUNAMIS con filas de continuación CAJA/DOCENA/etc.)
+    col_factor = _find_col(df, _COL_FACTOR)
+    col_unidad = _find_col(df, _COL_UNIDAD, exclude={col_qty} if col_qty else None)
+    has_multi_unit = col_unidad is not None and col_factor is not None
+
     code_cols = _find_cols(df, _COL_CODE)
     col_code  = code_cols[0] if code_cols else None
     col_code2 = code_cols[1] if len(code_cols) > 1 else None
@@ -382,51 +509,83 @@ def df_to_products(df, log=None) -> list[dict]:
                 break
 
     if log:
-        log(f"  nombre={col_name}  precio={col_price}  costo={col_cost}  "
+        log(f"  nombre={col_name}  precio={col_price}  precio_alt={col_price_alt}  costo={col_cost}  "
             f"marca={col_brand}  cat={col_cat}  qty={col_qty}  "
             f"exist_min={col_exist_min}  exist_max={col_exist_max}  "
             f"ubic={col_ubic}  codigo={col_code}  codigo_item={col_code2}  "
-            f"desc_corta={col_desc_short}")
+            f"desc_corta={col_desc_short}  unidad={col_unidad}  factor={col_factor}")
 
-    products = []
+    products: list[dict] = []
+    last_product: dict | None = None
     for _, row in df.iterrows():
         name = _safe_str(row[col_name]) if col_name else ""
-        if not name:
+        if name:
+            try:
+                price = float(_safe_str(row[col_price]).replace(",", ".")) if col_price else 0.0
+            except ValueError:
+                price = 0.0
+            try:
+                cost = float(_safe_str(row[col_cost]).replace(",", ".")) if col_cost else 0.0
+            except ValueError:
+                cost = 0.0
+            try:
+                qty = int(float(_safe_str(row[col_qty]).replace(",", "."))) if col_qty else 0
+            except ValueError:
+                qty = 0
+            try:
+                exist_min = int(float(_safe_str(row[col_exist_min]).replace(",", "."))) if col_exist_min else 0
+            except ValueError:
+                exist_min = 0
+            try:
+                exist_max = int(float(_safe_str(row[col_exist_max]).replace(",", "."))) if col_exist_max else 0
+            except ValueError:
+                exist_max = 0
+            product = {
+                "descripcion":    name.upper(),
+                "precio":         price,
+                "costo":          cost,
+                "cantidad":       max(qty, 0),
+                "existencia_minima": max(exist_min, 0),
+                "existencia_maxima": max(exist_max, 0),
+                "marca_text":     _safe_str(row[col_brand]).upper() if col_brand else "",
+                "categoria_text": _safe_str(row[col_cat]).upper()   if col_cat   else "",
+                "ubicacion_text": _safe_str(row[col_ubic]).upper()  if col_ubic  else "",
+                "codigo_origen":  _safe_str(row[col_code])          if col_code  else "",
+                "codigo_item_origen": _safe_str(row[col_code2])     if col_code2 else "",
+                "descripcion_corta_origen": _safe_str(row[col_desc_short]) if col_desc_short else "",
+                "unidad_texto":   _safe_str(row[col_unidad]) if col_unidad else "",
+                "unidades_alternas": [],
+            }
+            products.append(product)
+            last_product = product
             continue
-        try:
-            price = float(_safe_str(row[col_price]).replace(",", ".")) if col_price else 0.0
-        except ValueError:
-            price = 0.0
-        try:
-            cost = float(_safe_str(row[col_cost]).replace(",", ".")) if col_cost else 0.0
-        except ValueError:
-            cost = 0.0
-        try:
-            qty = int(float(_safe_str(row[col_qty]).replace(",", "."))) if col_qty else 0
-        except ValueError:
-            qty = 0
-        try:
-            exist_min = int(float(_safe_str(row[col_exist_min]).replace(",", "."))) if col_exist_min else 0
-        except ValueError:
-            exist_min = 0
-        try:
-            exist_max = int(float(_safe_str(row[col_exist_max]).replace(",", "."))) if col_exist_max else 0
-        except ValueError:
-            exist_max = 0
-        products.append({
-            "descripcion":    name.upper(),
-            "precio":         price,
-            "costo":          cost,
-            "cantidad":       max(qty, 0),
-            "existencia_minima": max(exist_min, 0),
-            "existencia_maxima": max(exist_max, 0),
-            "marca_text":     _safe_str(row[col_brand]).upper() if col_brand else "",
-            "categoria_text": _safe_str(row[col_cat]).upper()   if col_cat   else "",
-            "ubicacion_text": _safe_str(row[col_ubic]).upper()  if col_ubic  else "",
-            "codigo_origen":  _safe_str(row[col_code])          if col_code  else "",
-            "codigo_item_origen": _safe_str(row[col_code2])     if col_code2 else "",
-            "descripcion_corta_origen": _safe_str(row[col_desc_short]) if col_desc_short else "",
-        })
+
+        # Fila sin nombre: posible fila de continuación (presentación alterna)
+        if has_multi_unit and last_product is not None:
+            unidad_text = _safe_str(row[col_unidad])
+            factor_text = _safe_str(row[col_factor])
+            if not unidad_text and not factor_text:
+                continue  # fila de relleno completamente vacía
+            try:
+                factor_val = float(factor_text.replace(",", ".")) if factor_text else 0.0
+            except ValueError:
+                factor_val = 0.0
+            try:
+                alt_precio = float(_safe_str(row[col_price_alt]).replace(",", ".")) if col_price_alt else 0.0
+            except ValueError:
+                alt_precio = 0.0
+            if factor_val <= 0 and log:
+                log(f"  ATENCION: factor invalido ({factor_text!r}) en unidad alterna "
+                    f"'{unidad_text}' de '{last_product['descripcion']}' — se registra igual.", "warn")
+            alt_costo = _safe_str(row[col_cost]) if col_cost else ""
+            if alt_costo and log:
+                log(f"  ATENCION: costo ({alt_costo}) en fila de unidad alterna '{unidad_text}' "
+                    f"de '{last_product['descripcion']}' se descarta (sin campo destino).", "warn")
+            last_product["unidades_alternas"].append({
+                "descripcion": unidad_text,
+                "factor":      factor_val,
+                "precio":      alt_precio,
+            })
     return products
 
 
@@ -498,16 +657,16 @@ def build_sheets(
 ) -> dict[str, "pd.DataFrame"]:
     """
     Construye todas las hojas del formato oficial.
-    CATEGORIA, MARCA y UBICACIONES se generan dinámicamente a partir de los productos.
-    UNIDADES es fija (UNIDADES_REF).
+    CATEGORIAS, MARCAS y UBICACION se generan dinámicamente a partir de los productos.
+    UNIDADES es fija (UNIDADES_REF). UNIDAD_MEDIDA y PRODUCTOS_UNIDADES_MEDIDAS se
+    generan solo si los productos traen presentaciones alternas (unidades_alternas).
     """
-    ts = now_str()
-
     cat_tbl  = DynamicTable()
     brand_tbl = DynamicTable()
     ubic_tbl  = DynamicTable()
+    unit_tbl  = UnidadMedidaTable()
 
-    prods, sedes, detalles = [], [], []
+    prods, sedes, detalles, prod_units = [], [], [], []
     _auto_codigo = codigo_ini  # contador para productos sin código de origen
 
     for i, p in enumerate(products, start=1):
@@ -525,6 +684,11 @@ def build_sheets(
         m_id = brand_tbl.get_or_add(brand_name) if brand_name != "GENERAL" else 1
         u_id = ubic_tbl.get_or_add(ubic_text)   if ubic_text              else 1
 
+        # Unidad base: resuelta por producto desde el texto de origen si existe,
+        # o el valor global de la GUI como respaldo.
+        unidad_texto = (p.get("unidad_texto") or "").strip()
+        producto_unidad_id = resolve_unidad_id(unidad_texto, default=unidad_id) if unidad_texto else unidad_id
+
         # Código: respetar el del origen; generar incremental si está vacío
         codigo_origen = (p.get("codigo_origen") or "").strip()
         if codigo_origen:
@@ -537,9 +701,10 @@ def build_sheets(
             "id":                 i,
             "descripcion":        desc,
             "codigo":             codigo_val,
+            "codigo_actividad":   "",
             "codigo_item":        (p.get("codigo_item_origen") or "").strip(),
             "codigo_linea":       "",
-            "unidad_id":          unidad_id,
+            "unidad_id":          producto_unidad_id,
             "imagen":             "",
             "estado":             1,
             "es_servicio":        0,
@@ -548,9 +713,9 @@ def build_sheets(
             "ubicacion_id":       u_id,
             "descripcion_larga":  "",
             "codigo_sin":         "",
-            "created_at":         ts,
-            "updated_at":         ts,
-            "slug":               make_slug(desc),
+            "created_at":         "",
+            "updated_at":         "",
+            "slug":               "",
             "descripcion_corta":  (p.get("descripcion_corta_origen") or "").strip(),
             "principio_activo":   "",
             "registro_sanitario": "",
@@ -588,18 +753,18 @@ def build_sheets(
             "precio_unitario4":            0,
             "cantidad4":                   0,
             "utilidad":                    utilidad_val,
-            "utilidad2":                   0,
-            "utilidad3":                   0,
-            "utilidad4":                   0,
+            "utilidad2":                   "",
+            "utilidad3":                   "",
+            "utilidad4":                   "",
             "costo":                       costo,
-            "precio_factura":              precio,
-            "utilidad_factura":            0,
-            "aplicar_lista_precios":       0,
-            "factor":                      1,
-            "calcular_cantidad_por_precio":0,
-            "mostrar_en_ecommerce":        0,
-            "es_alquilable":               0,
-            "tarifa_alquiler":             0,
+            "precio_factura":              "",
+            "utilidad_factura":            "",
+            "aplicar_lista_precios":       "",
+            "factor":                      None,
+            "calcular_cantidad_por_precio":"",
+            "mostrar_en_ecommerce":        "",
+            "es_alquilable":               "",
+            "tarifa_alquiler":             "",
         })
 
         detalles.append({
@@ -608,24 +773,36 @@ def build_sheets(
             "sede_id":     sede_id,
             "cantidad":    cant,
             "costo":       costo,
-            "created_at":  ts,
-            "updated_at":  ts,
+            "created_at":  "",
+            "updated_at":  "",
             "lote":        "",
             "vencimiento": "",
         })
 
+        # Presentaciones alternas del producto (hoja PRODUCTOS_UNIDADES_MEDIDAS)
+        for orden, alt in enumerate(p.get("unidades_alternas", []), start=1):
+            um_id = unit_tbl.get_or_add(alt["descripcion"], alt["factor"])
+            prod_units.append({
+                "id":                len(prod_units) + 1,
+                "producto_id":       i,
+                "unidad_medida_id":  um_id,
+                "precio_unitario":   alt.get("precio", 0.0),
+                "orden":             orden,
+                "calcular_precio":   0,
+            })
+
     # Construir DataFrames de referencia desde las tablas dinámicas
     cats = [
         {"id": r["id"], "descripcion": r["descripcion"],
-         "categoria_padre_id": "", "imagen": "",
-         "slug": make_slug(r["descripcion"]),
+         "categoria_padre_id": "",
+         "slug": "",
          "descripcion_larga": "", "descripcion_corta": "", "es_para_menu": 0}
         for r in cat_tbl.items()
     ]
 
     marcas = [
         {"id": r["id"], "descripcion": r["descripcion"],
-         "imagen": "", "slug": make_slug(r["descripcion"])}
+         "slug": ""}
         for r in brand_tbl.items()
     ]
 
@@ -634,15 +811,23 @@ def build_sheets(
         for r in ubic_tbl.items()
     ]
 
+    unidades_medida = [
+        {"id": r["id"], "unidad_id": r["unidad_id"], "descripcion": r["descripcion"],
+         "factor": r["factor"], "estado": 1, "created_at": "", "updated_at": ""}
+        for r in unit_tbl.items()
+    ]
+
     return {
         "CLIENTE PROVEEDORES": pd.DataFrame(columns=CLIENTE_PROV_COLS),
-        "PRODUCTOS":           pd.DataFrame(prods),
+        "PRODUCTOS":           pd.DataFrame(prods).reindex(columns=PRODUCTOS_COLS),
         "PRODUCTOS DETALLES":  pd.DataFrame(detalles),
-        "PRODUCTO SEDES":      pd.DataFrame(sedes),
-        "UNIDADES":            pd.DataFrame(UNIDADES_REF),
-        "CATEGORIA":           pd.DataFrame(cats),
-        "MARCA":               pd.DataFrame(marcas),
-        "UBICACIONES":         pd.DataFrame(ubicaciones),
+        "PRODUCTO SEDES":      pd.DataFrame(sedes).reindex(columns=PRODUCTO_SEDES_COLS),
+        "UNIDADES":            pd.DataFrame(UNIDADES_REF).reindex(columns=UNIDADES_EXPORT_COLS),
+        "UNIDAD_MEDIDA":       pd.DataFrame(unidades_medida).reindex(columns=UNIDAD_MEDIDA_COLS),
+        "PRODUCTOS_UNIDADES_MEDIDAS": pd.DataFrame(prod_units).reindex(columns=PRODUCTOS_UM_COLS),
+        "CATEGORIAS":          pd.DataFrame(cats).reindex(columns=CATEGORIAS_COLS),
+        "MARCAS":              pd.DataFrame(marcas).reindex(columns=MARCAS_COLS),
+        "UBICACION":           pd.DataFrame(ubicaciones).reindex(columns=UBICACION_COLS),
     }
 
 
@@ -678,14 +863,14 @@ def write_excel(sheets: dict[str, "pd.DataFrame"], path: str) -> None:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Automatizador de Inventarios — SI ESAM  v1.1")
+        self.title("Automatizador de Inventarios — SI ESAM  v1.2")
         self.geometry("1050x700")
         self.minsize(820, 560)
         self.configure(bg="#F0F4F8")
         self._input_file: str | None = None
         self._placeholder_active = True
         self._build_ui()
-        self._log("Sistema iniciado  (v1.1).")
+        self._log("Sistema iniciado  (v1.2).")
         self._check_deps()
 
     # ── Construcción de la interfaz ───────────────────────────────────────────
@@ -1037,12 +1222,14 @@ class App(tk.Tk):
             messagebox.showerror("Error", str(exc))
             return
 
-        n_cat   = len(sheets["CATEGORIA"])
-        n_brand = len(sheets["MARCA"])
-        n_ubic  = len(sheets["UBICACIONES"])
+        n_cat   = len(sheets["CATEGORIAS"])
+        n_brand = len(sheets["MARCAS"])
+        n_ubic  = len(sheets["UBICACION"])
+        n_unit_med = len(sheets["UNIDAD_MEDIDA"])
         self._log(f"  Categorías generadas : {n_cat}", "info")
         self._log(f"  Marcas generadas    : {n_brand}", "info")
         self._log(f"  Ubicaciones         : {n_ubic}", "info")
+        self._log(f"  Presentaciones (UNIDAD_MEDIDA): {n_unit_med}", "info")
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         save_path = filedialog.asksaveasfilename(
@@ -1096,15 +1283,15 @@ class App(tk.Tk):
 
         ttk.Label(win,
                   text="Las columnas Marca y Categoría muestran los valores que se crearán "
-                       "en las hojas MARCA y CATEGORIA del Excel.",
+                       "en las hojas MARCAS y CATEGORIAS del Excel.",
                   foreground="#555", font=("Segoe UI", 9)).pack()
 
         fr = ttk.Frame(win, padding=(8, 4, 8, 0))
         fr.pack(fill=tk.BOTH, expand=True)
 
-        cols    = ("#", "Código", "Descripción", "Precio (Bs)", "Marca", "Categoría", "Cant.")
-        widths  = [38, 90, 260, 88, 110, 100, 55]
-        anchors = ["center", "center", "w", "center", "w", "w", "center"]
+        cols    = ("#", "Código", "Descripción", "Precio (Bs)", "Marca", "Categoría", "Cant.", "Unid. Alt.")
+        widths  = [38, 90, 260, 88, 110, 100, 55, 70]
+        anchors = ["center", "center", "w", "center", "w", "w", "center", "center"]
 
         tree = ttk.Treeview(fr, columns=cols, show="headings", height=14)
         for c, w, a in zip(cols, widths, anchors):
@@ -1126,6 +1313,7 @@ class App(tk.Tk):
                 brand_name,
                 cat_name,
                 p.get("cantidad", 1),
+                len(p.get("unidades_alternas", [])),
             ))
 
         result = [False]
