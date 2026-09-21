@@ -2,6 +2,8 @@
 
 Guía rápida para convertir cualquier inventario (Excel o CSV) al formato oficial de SI ESAM, sin necesidad de tocar código.
 
+> 🗂️ Para el detalle de qué columna de tu Excel va a cada campo de salida, ver **[MAPEO_COLUMNAS.md](MAPEO_COLUMNAS.md)**.
+
 ---
 
 ## 1. Abrir la aplicación

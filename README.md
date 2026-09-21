@@ -6,6 +6,7 @@ La hoja **UNIDADES** es siempre la lista fija oficial del SIN Bolivia (124 unida
 
 > 📖 **[Guía de instalación paso a paso](INSTALACION.md)** — para instalar en una computadora nueva, desde cero.
 > 📘 **[Manual de usuario](MANUAL_USUARIO.md)** — cómo usar la aplicación una vez instalada.
+> 🗂️ **[Mapeo de columnas](MAPEO_COLUMNAS.md)** — qué columnas detecta en el Excel de entrada y dónde las coloca en el de salida.
 
 ---
 
