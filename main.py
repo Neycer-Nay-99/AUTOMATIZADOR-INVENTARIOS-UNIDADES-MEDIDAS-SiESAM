@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import traceback
 import datetime
 from pathlib import Path
@@ -910,7 +911,10 @@ def build_sheets(
     # Construir DataFrames de referencia desde las tablas dinámicas
     cats = [
         {"id": r["id"], "descripcion": r["descripcion"],
-         "categoria_padre_id": r.get("categoria_padre_id", ""),
+         # El importador del ERP espera el texto literal "NULL" (no una
+         # celda vacía) para las categorías sin padre — una celda vacía la
+         # convierte en '' y MySQL la rechaza en la columna entera.
+         "categoria_padre_id": r.get("categoria_padre_id", "NULL"),
          "slug": "",
          "descripcion_larga": "", "descripcion_corta": "", "es_para_menu": 0}
         for r in cat_tbl.items()
@@ -976,6 +980,16 @@ def write_excel(sheets: dict[str, "pd.DataFrame"], path: str) -> None:
 
 # ─── GUI ──────────────────────────────────────────────────────────────────────
 
+def _resource_path(name: str) -> str:
+    """
+    Ruta a un archivo de recurso (ej. el ícono), tanto corriendo desde
+    código fuente como empaquetado con PyInstaller (--onefile lo extrae a
+    una carpeta temporal apuntada por sys._MEIPASS).
+    """
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return str(base / name)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -983,6 +997,10 @@ class App(tk.Tk):
         self.geometry("1050x700")
         self.minsize(820, 560)
         self.configure(bg="#F0F4F8")
+        try:
+            self.iconbitmap(_resource_path("siesam.ico"))
+        except tk.TclError:
+            pass
         self._input_file: str | None = None
         self._build_ui()
         self._log("Sistema iniciado  (v1.2).")
