@@ -7,6 +7,9 @@ CATEGORIAS, MARCAS y UBICACION se construyen dinámicamente desde los datos de e
 UNIDADES es una lista fija completa (SIN, Bolivia).
 Si el origen trae columnas Unidad/Factor, se generan además UNIDAD_MEDIDA y
 PRODUCTOS_UNIDADES_MEDIDAS para presentaciones alternas (caja, docena, etc.).
+Si trae columnas Color/Talla/Material, cada fila es una variante del producto:
+se generan ATRIBUTOS_VALUES, PRODUCTOS_ATRIBUTOS y una fila de PRODUCTOS DETALLES
+por variante.
 Código de producto: se extrae del origen si existe la columna, si no se genera incremental.
 """
 from __future__ import annotations
@@ -177,6 +180,7 @@ SHEET_ORDER = [
     "CLIENTE PROVEEDORES", "PRODUCTOS", "PRODUCTOS DETALLES",
     "PRODUCTO SEDES", "UNIDADES", "UNIDAD_MEDIDA", "PRODUCTOS_UNIDADES_MEDIDAS",
     "CATEGORIAS", "MARCAS", "UBICACION",
+    "ATRIBUTOS", "ATRIBUTOS_VALUES", "PRODUCTOS_ATRIBUTOS",
 ]
 
 # ─── Orden de columnas de exportación (debe igualar la plantilla oficial) ────
@@ -203,6 +207,22 @@ UBICACION_COLS = ["id", "descripcion", "color"]
 UNIDADES_EXPORT_COLS = ["ID", "DESCRIPCION"]
 UNIDAD_MEDIDA_COLS = ["id", "unidad_id", "descripcion", "factor", "estado", "created_at", "updated_at"]
 PRODUCTOS_UM_COLS = ["id", "producto_id", "unidad_medida_id", "precio_unitario", "orden", "calcular_precio"]
+PRODUCTOS_DETALLES_COLS = [
+    "id", "producto_id", "sede_id", "cantidad", "costo", "created_at", "updated_at",
+    "lote", "vencimiento", "ATRIBUOS_VALUES_ID", "CLAVE",  # "ATRIBUOS" así, tal cual lo espera el ERP
+]
+ATRIBUTOS_COLS = ["ID", "DESCRIPCION"]
+ATRIBUTOS_VALUES_COLS = ["ID", "ATRIBUTO_ID", "DESCRIPCION"]
+PRODUCTOS_ATRIBUTOS_COLS = ["id", "producto_id", "atributo_id"]
+
+# Catálogo fijo de atributos de variante (hoja ATRIBUTOS). El orden de los ids
+# define también el orden de los valores dentro de ATRIBUOS_VALUES_ID.
+ATRIBUTO_COLOR, ATRIBUTO_TALLA, ATRIBUTO_MATERIAL = 1, 2, 3
+ATRIBUTOS_REF = [
+    {"ID": ATRIBUTO_COLOR,    "DESCRIPCION": "COLOR"},
+    {"ID": ATRIBUTO_TALLA,    "DESCRIPCION": "TALLA"},
+    {"ID": ATRIBUTO_MATERIAL, "DESCRIPCION": "MATERIAL"},
+]
 
 # Campos mostrados en el panel "Columnas detectadas en este archivo" de la
 # GUI: (etiqueta visible, clave del dict que devuelve detect_columns()).
@@ -210,6 +230,9 @@ _DETECT_FIELDS = [
     ("Código/SKU",             "codigo"),
     ("Nombre/Descripción",     "nombre"),
     ("Precio",                 "precio"),
+    ("Precio 2",               "precio2"),
+    ("Precio 3",               "precio3"),
+    ("Precio 4",               "precio4"),
     ("Costo",                  "costo"),
     ("Marca",                  "marca"),
     ("Categoría",              "categoria"),
@@ -220,6 +243,10 @@ _DETECT_FIELDS = [
     ("Factor",                 "factor"),
     ("Lote",                   "lote"),
     ("Vencimiento",            "vencimiento"),
+    ("Color (variante)",       "color"),
+    ("Talla (variante)",       "talla"),
+    ("Material (variante)",    "material"),
+    ("Clave (variante)",       "clave"),
     ("Principio Activo",       "principio_activo"),
     ("Registro Sanitario",     "registro_sanitario"),
 ]
@@ -393,6 +420,50 @@ class UnidadMedidaTable:
         return list(self._rows)
 
 
+def _normalize_attr_value(val) -> str:
+    """
+    Normaliza el valor de un atributo de variante (color/talla/material):
+    mayúsculas, sin tildes y sin espacios sobrantes. Los números se formatean
+    sin decimales sobrantes (33.0 -> "33", 36.5 -> "36.5", "7,5" -> "7.5"),
+    porque pandas lee la columna TALLA como float cuando mezcla medias tallas.
+    """
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        # celda vacía en columna numérica -> NaN (única float distinta de sí misma)
+        return "" if val != val else _format_factor(val)
+    s = _safe_str(val)
+    if re.fullmatch(r"\d+,\d+", s):
+        s = s.replace(",", ".")
+    for chars, repl in [("ÁÀÄÂáàäâ", "A"), ("ÉÈËÊéèëê", "E"), ("ÍÌÏÎíìïî", "I"),
+                        ("ÓÒÖÔóòöô", "O"), ("ÚÙÜÛúùüû", "U")]:
+        for c in chars:
+            s = s.replace(c, repl)
+    return re.sub(r"\s+", " ", s).upper()
+
+
+class AtributoValueTable:
+    """
+    Catálogo deduplicado de valores de atributo (hoja ATRIBUTOS_VALUES): una
+    fila por combinación única (atributo_id, descripcion) — "NEGRO" como
+    COLOR y "NEGRO" como MATERIAL son filas distintas. Empieza vacío.
+    """
+
+    def __init__(self):
+        self._rows: list[dict] = []
+        self._idx:  dict[tuple[int, str], int] = {}
+
+    def get_or_add(self, atributo_id: int, descripcion: str) -> int:
+        key = (atributo_id, descripcion)
+        if key in self._idx:
+            return self._idx[key]
+        new_id = len(self._rows) + 1
+        self._rows.append({"ID": new_id, "ATRIBUTO_ID": atributo_id, "DESCRIPCION": descripcion})
+        self._idx[key] = new_id
+        return new_id
+
+    def items(self) -> list[dict]:
+        return list(self._rows)
+
+
 # ─── Extracción de datos ──────────────────────────────────────────────────────
 
 # Heurística de columnas para Excel / CSV
@@ -427,6 +498,12 @@ _COL_VENCIMIENTO = ["vencimiento", "caducidad", "expiracion", "expiración",
 _COL_PRINCIPIO_ACTIVO = ["principio activo", "principio-activo", "active ingredient"]
 _COL_REGISTRO_SANITARIO = ["registro sanitario", "reg. sanitario", "reg sanitario",
                              "registro san"]
+# Atributos de variante (ej. calzado/ropa): cada fila del origen es una variante
+# con los atributos que tenga llenos. CLAVE = código interno de la variante.
+_COL_COLOR    = ["color", "colour"]
+_COL_TALLA    = ["talla", "size"]
+_COL_MATERIAL = ["material"]
+_COL_CLAVE    = ["clave"]
 
 # Formatos aceptados para la fecha de vencimiento en el origen (además de
 # fechas ya parseadas por pandas como datetime/Timestamp)
@@ -510,6 +587,17 @@ def _find_cols(df, keywords: list[str]) -> list[str]:
     return [col for col in df.columns if any(kw in str(col).lower() for kw in keywords)]
 
 
+def _find_precio_n(df, n: int) -> str | None:
+    """Columna de la lista de precio N (2, 3 o 4): encabezado "PRECIO 2",
+    "PRECIO2", "PRECIO_2" o "PRECIO-2" (comparación exacta tras quitar
+    espacios/guiones, para no confundir con otras columnas de precio)."""
+    target = f"precio{n}"
+    for col in df.columns:
+        if re.sub(r"[\s_\-]+", "", str(col).lower()) == target:
+            return col
+    return None
+
+
 def _safe_str(val) -> str:
     s = str(val).strip()
     return "" if s.lower() in ("nan", "none", "") else s
@@ -536,7 +624,13 @@ def detect_columns(df) -> dict[str, str | None]:
     # Algunos orígenes (ej. DUNAMIS) traen una segunda columna "PRECIO" después
     # de FACTOR, dedicada al precio de las filas de continuación (presentación
     # alterna): esa segunda columna se guarda aparte como col_price_alt.
-    _price_cols = [c for c in _find_cols(df, _COL_PRICE) if c != col_cost]
+    # Las listas de precio 2/3/4 se detectan primero y se excluyen del precio
+    # normal: si no, "PRECIO 2" se tomaría como col_price_alt.
+    col_precio2 = _find_precio_n(df, 2)
+    col_precio3 = _find_precio_n(df, 3)
+    col_precio4 = _find_precio_n(df, 4)
+    _excluir_precio = {c for c in (col_cost, col_precio2, col_precio3, col_precio4) if c}
+    _price_cols = [c for c in _find_cols(df, _COL_PRICE) if c not in _excluir_precio]
     col_price = _price_cols[0] if _price_cols else None
     col_price_alt = _price_cols[1] if len(_price_cols) > 1 else col_price
     col_brand = _find_col(df, _COL_BRAND)
@@ -570,6 +664,10 @@ def detect_columns(df) -> dict[str, str | None]:
     col_vencimiento = _find_col(df, _COL_VENCIMIENTO)
     col_principio_activo = _find_col(df, _COL_PRINCIPIO_ACTIVO)
     col_registro_sanitario = _find_col(df, _COL_REGISTRO_SANITARIO)
+    col_color    = _find_col(df, _COL_COLOR)
+    col_talla    = _find_col(df, _COL_TALLA)
+    col_material = _find_col(df, _COL_MATERIAL)
+    col_clave    = _find_col(df, _COL_CLAVE)
 
     if col_name is None:
         for c in df.columns:
@@ -579,6 +677,7 @@ def detect_columns(df) -> dict[str, str | None]:
 
     return {
         "nombre": col_name, "precio": col_price, "precio_alt": col_price_alt,
+        "precio2": col_precio2, "precio3": col_precio3, "precio4": col_precio4,
         "costo": col_cost, "marca": col_brand, "categoria": col_cat,
         "subcategoria": col_subcat, "cantidad": col_qty,
         "exist_min": col_exist_min, "exist_max": col_exist_max,
@@ -587,6 +686,8 @@ def detect_columns(df) -> dict[str, str | None]:
         "lote": col_lote, "vencimiento": col_vencimiento,
         "principio_activo": col_principio_activo,
         "registro_sanitario": col_registro_sanitario,
+        "color": col_color, "talla": col_talla, "material": col_material,
+        "clave": col_clave,
     }
 
 
@@ -612,16 +713,40 @@ def df_to_products(df, log=None) -> list[dict]:
     col_vencimiento = cols["vencimiento"]
     col_principio_activo   = cols["principio_activo"]
     col_registro_sanitario = cols["registro_sanitario"]
+    col_clave       = cols["clave"]
     has_multi_unit  = col_unidad is not None and col_factor is not None
+    # Columnas de atributo de variante presentes, en orden de atributo_id
+    attr_cols = [(aid, c) for aid, c in ((ATRIBUTO_COLOR, cols["color"]),
+                                          (ATRIBUTO_TALLA, cols["talla"]),
+                                          (ATRIBUTO_MATERIAL, cols["material"])) if c]
 
     if log:
-        log(f"  nombre={col_name}  precio={col_price}  precio_alt={col_price_alt}  costo={col_cost}  "
+        log(f"  nombre={col_name}  precio={col_price}  precio_alt={col_price_alt}  "
+            f"precio2={cols['precio2']}  precio3={cols['precio3']}  precio4={cols['precio4']}  costo={col_cost}  "
             f"marca={col_brand}  cat={col_cat}  subcat={col_subcat}  qty={col_qty}  "
             f"exist_min={col_exist_min}  exist_max={col_exist_max}  "
             f"ubic={col_ubic}  codigo={col_code}  codigo_item={col_code2}  "
             f"desc_corta={col_desc_short}  unidad={col_unidad}  factor={col_factor}  "
             f"lote={col_lote}  vencimiento={col_vencimiento}  "
-            f"principio_activo={col_principio_activo}  registro_sanitario={col_registro_sanitario}")
+            f"principio_activo={col_principio_activo}  registro_sanitario={col_registro_sanitario}  "
+            f"color={cols['color']}  talla={cols['talla']}  material={cols['material']}  "
+            f"clave={col_clave}")
+
+    def read_variante(row, qty: int, cost: float | None) -> dict | None:
+        """Variante de la fila (solo los atributos llenos), o None si no tiene ninguno."""
+        atributos = {}
+        for aid, c in attr_cols:
+            val = _normalize_attr_value(row[c])
+            if val:
+                atributos[aid] = val
+        if not atributos:
+            return None
+        return {
+            "atributos": atributos,
+            "cantidad":  max(qty, 0),
+            "costo":     cost,
+            "clave":     _safe_str(row[col_clave]) if col_clave else "",
+        }
 
     products: list[dict] = []
     last_product: dict | None = None
@@ -648,9 +773,19 @@ def df_to_products(df, log=None) -> list[dict]:
                 exist_max = int(float(_safe_str(row[col_exist_max]).replace(",", "."))) if col_exist_max else 0
             except ValueError:
                 exist_max = 0
+            precios_n = {}
+            for n in (2, 3, 4):
+                c = cols[f"precio{n}"]
+                try:
+                    precios_n[n] = float(_safe_str(row[c]).replace(",", ".") or 0) if c else 0.0
+                except ValueError:
+                    precios_n[n] = 0.0
             product = {
                 "descripcion":    name.upper(),
                 "precio":         price,
+                "precio2":        precios_n[2],
+                "precio3":        precios_n[3],
+                "precio4":        precios_n[4],
                 "costo":          cost,
                 "cantidad":       max(qty, 0),
                 "existencia_minima": max(exist_min, 0),
@@ -668,11 +803,33 @@ def df_to_products(df, log=None) -> list[dict]:
                                         contexto=f" en '{name.upper()}'") if col_vencimiento else "",
                 "principio_activo_origen": _safe_str(row[col_principio_activo]) if col_principio_activo else "",
                 "registro_sanitario_origen": _safe_str(row[col_registro_sanitario]) if col_registro_sanitario else "",
+                "clave_origen":   _safe_str(row[col_clave]) if col_clave else "",
                 "unidades_alternas": [],
+                "variantes":      [],
             }
+            # La fila base también es una variante si trae algún atributo
+            variante = read_variante(row, qty, None)
+            if variante:
+                product["variantes"].append(variante)
             products.append(product)
             last_product = product
             continue
+
+        # Fila sin nombre con atributos: variante del producto anterior
+        # (ej. las tallas debajo del modelo en calzado)
+        if attr_cols and last_product is not None:
+            try:
+                v_qty = int(float(_safe_str(row[col_qty]).replace(",", "."))) if col_qty else 0
+            except ValueError:
+                v_qty = 0
+            try:
+                v_cost_text = _safe_str(row[col_cost]) if col_cost else ""
+                v_cost = float(v_cost_text.replace(",", ".")) if v_cost_text else None
+            except ValueError:
+                v_cost = None
+            variante = read_variante(row, v_qty, v_cost)
+            if variante:
+                last_product["variantes"].append(variante)
 
         # Fila sin nombre: posible fila de continuación (presentación alterna)
         if has_multi_unit and last_product is not None:
@@ -772,13 +929,16 @@ def build_sheets(
     CATEGORIAS, MARCAS y UBICACION se generan dinámicamente a partir de los productos.
     UNIDADES es fija (UNIDADES_REF). UNIDAD_MEDIDA y PRODUCTOS_UNIDADES_MEDIDAS se
     generan solo si los productos traen presentaciones alternas (unidades_alternas).
+    ATRIBUTOS es fija (COLOR/TALLA/MATERIAL); ATRIBUTOS_VALUES y PRODUCTOS_ATRIBUTOS
+    se generan solo si los productos traen variantes (columnas Color/Talla/Material).
     """
     cat_tbl  = CategoriaTable()
     brand_tbl = DynamicTable()
     ubic_tbl  = DynamicTable()
     unit_tbl  = UnidadMedidaTable()
+    attr_val_tbl = AtributoValueTable()
 
-    prods, sedes, detalles, prod_units = [], [], [], []
+    prods, sedes, detalles, prod_units, prod_attrs = [], [], [], [], []
     _auto_codigo = codigo_ini  # contador para productos sin código de origen
 
     for i, p in enumerate(products, start=1):
@@ -849,12 +1009,18 @@ def build_sheets(
 
         # Margen de utilidad: ((precio_unitario / costo) - 1) * 100
         # Sin costo pero con precio -> 100 por defecto. Con costo pero sin precio -> 0.
-        if costo > 0 and precio > 0:
-            utilidad_val = round(((precio / costo) - 1) * 100, 2)
-        elif costo <= 0 and precio > 0:
-            utilidad_val = 100
-        else:
-            utilidad_val = 0
+        # Misma regla para las listas de precio 2/3/4 (siempre sobre el costo unitario).
+        def _utilidad(pv: float) -> float:
+            if costo > 0 and pv > 0:
+                return round(((pv / costo) - 1) * 100, 2)
+            if costo <= 0 and pv > 0:
+                return 100
+            return 0
+
+        utilidad_val = _utilidad(precio)
+        precio2 = p.get("precio2", 0.0) or 0.0
+        precio3 = p.get("precio3", 0.0) or 0.0
+        precio4 = p.get("precio4", 0.0) or 0.0
 
         sedes.append({
             "id":                          i,
@@ -863,16 +1029,17 @@ def build_sheets(
             "precio_unitario":             precio,
             "esta_activo":                 1,
             "cantidad":                    1,  # el precio es por unidad; la cantidad real va en PRODUCTOS DETALLES
-            "precio_unitario2":            0,
-            "cantidad2":                   0,
-            "precio_unitario3":            0,
-            "cantidad3":                   0,
-            "precio_unitario4":            0,
-            "cantidad4":                   0,
+            # listas de precio 2/3/4: cantidad siempre 1; sin precio -> 0 / 1 / utilidad 0
+            "precio_unitario2":            precio2,
+            "cantidad2":                   1,
+            "precio_unitario3":            precio3,
+            "cantidad3":                   1,
+            "precio_unitario4":            precio4,
+            "cantidad4":                   1,
             "utilidad":                    utilidad_val,
-            "utilidad2":                   "",
-            "utilidad3":                   "",
-            "utilidad4":                   "",
+            "utilidad2":                   _utilidad(precio2),
+            "utilidad3":                   _utilidad(precio3),
+            "utilidad4":                   _utilidad(precio4),
             "costo":                       costo,
             "precio_factura":              "",
             "utilidad_factura":            "",
@@ -884,17 +1051,46 @@ def build_sheets(
             "tarifa_alquiler":             "",
         })
 
-        detalles.append({
-            "id":          i,
-            "producto_id": i,
-            "sede_id":     sede_id,
-            "cantidad":    cant,
-            "costo":       costo,
-            "created_at":  "",
-            "updated_at":  "",
-            "lote":        (p.get("lote_origen") or "").strip(),
-            "vencimiento": (p.get("vencimiento_origen") or "").strip(),
-        })
+        # PRODUCTOS DETALLES: una fila por variante (producto_id repetido, cada
+        # una con su cantidad). Sin variantes: una sola fila, igual que antes.
+        lote        = (p.get("lote_origen") or "").strip()
+        vencimiento = (p.get("vencimiento_origen") or "").strip()
+        variantes = p.get("variantes") or []
+        if variantes:
+            for v in variantes:
+                val_ids = [attr_val_tbl.get_or_add(aid, val)
+                           for aid, val in sorted(v["atributos"].items())]
+                v_costo = v.get("costo")
+                detalles.append({
+                    "id":          len(detalles) + 1,
+                    "producto_id": i,
+                    "sede_id":     sede_id,
+                    "cantidad":    v["cantidad"],
+                    "costo":       costo if v_costo is None else round(v_costo, 5),
+                    "created_at":  "",
+                    "updated_at":  "",
+                    "lote":        lote,
+                    "vencimiento": vencimiento,
+                    "ATRIBUOS_VALUES_ID": "[" + ",".join(str(x) for x in val_ids) + "]",
+                    "CLAVE":       v.get("clave", ""),
+                })
+            # PRODUCTOS_ATRIBUTOS: los atributos que usa al menos una variante
+            for aid in sorted({aid for v in variantes for aid in v["atributos"]}):
+                prod_attrs.append({"id": len(prod_attrs) + 1, "producto_id": i, "atributo_id": aid})
+        else:
+            detalles.append({
+                "id":          len(detalles) + 1,
+                "producto_id": i,
+                "sede_id":     sede_id,
+                "cantidad":    cant,
+                "costo":       costo,
+                "created_at":  "",
+                "updated_at":  "",
+                "lote":        lote,
+                "vencimiento": vencimiento,
+                "ATRIBUOS_VALUES_ID": "",
+                "CLAVE":       (p.get("clave_origen") or "").strip(),
+            })
 
         # Presentaciones alternas del producto (hoja PRODUCTOS_UNIDADES_MEDIDAS)
         for orden, alt in enumerate(p.get("unidades_alternas", []), start=1):
@@ -940,7 +1136,7 @@ def build_sheets(
     return {
         "CLIENTE PROVEEDORES": pd.DataFrame(columns=CLIENTE_PROV_COLS),
         "PRODUCTOS":           pd.DataFrame(prods).reindex(columns=PRODUCTOS_COLS),
-        "PRODUCTOS DETALLES":  pd.DataFrame(detalles),
+        "PRODUCTOS DETALLES":  pd.DataFrame(detalles).reindex(columns=PRODUCTOS_DETALLES_COLS),
         "PRODUCTO SEDES":      pd.DataFrame(sedes).reindex(columns=PRODUCTO_SEDES_COLS),
         "UNIDADES":            pd.DataFrame(UNIDADES_REF).reindex(columns=UNIDADES_EXPORT_COLS),
         "UNIDAD_MEDIDA":       pd.DataFrame(unidades_medida).reindex(columns=UNIDAD_MEDIDA_COLS),
@@ -948,6 +1144,9 @@ def build_sheets(
         "CATEGORIAS":          pd.DataFrame(cats).reindex(columns=CATEGORIAS_COLS),
         "MARCAS":              pd.DataFrame(marcas).reindex(columns=MARCAS_COLS),
         "UBICACION":           pd.DataFrame(ubicaciones).reindex(columns=UBICACION_COLS),
+        "ATRIBUTOS":           pd.DataFrame(ATRIBUTOS_REF).reindex(columns=ATRIBUTOS_COLS),
+        "ATRIBUTOS_VALUES":    pd.DataFrame(attr_val_tbl.items()).reindex(columns=ATRIBUTOS_VALUES_COLS),
+        "PRODUCTOS_ATRIBUTOS": pd.DataFrame(prod_attrs).reindex(columns=PRODUCTOS_ATRIBUTOS_COLS),
     }
 
 
@@ -1226,6 +1425,8 @@ class App(tk.Tk):
                                     "(si hay 2 columnas que matchean, la 1ra va a 'codigo' y la 2da a 'codigo_item')"),
             ("Nombre/Descripción", "nombre, producto, descripcion, item, articulo, name, product"),
             ("Precio",             "precio, price, valor, pvp, tarifa, importe, monto, venta"),
+            ("Precio 2 / 3 / 4",   "PRECIO 2, PRECIO 3, PRECIO 4 (también PRECIO2, PRECIO_2...). "
+                                    "Llenan precio_unitario2/3/4 con cantidad 1 y utilidad calculada sobre el costo"),
             ("Costo",              "costo, cost, compra"),
             ("Marca",              "marca, brand, fabricante"),
             ("Categoría",          "categoria, category, tipo, grupo, familia, family"),
@@ -1241,6 +1442,11 @@ class App(tk.Tk):
             ("Lote",               "lote, lot, batch"),
             ("Vencimiento",        "vencimiento, caducidad, expiracion, expiración, expiry, expiration "
                                     "(acepta DD-MM-AAAA, DD/MM/AAAA o fecha de Excel; se exporta como AAAA-MM-DD)"),
+            ("Color (variante)",   "color, colour (cada fila, con o sin nombre, es una variante con "
+                                    "los atributos que tenga llenos; arma ATRIBUTOS_VALUES y PRODUCTOS_ATRIBUTOS)"),
+            ("Talla (variante)",   "talla, size"),
+            ("Material (variante)", "material"),
+            ("Clave (variante)",   "clave (código interno de la variante; opcional)"),
             ("Principio Activo",   "principio activo, principio-activo, active ingredient"),
             ("Registro Sanitario", "registro sanitario, reg. sanitario, reg sanitario, registro san"),
         ]
@@ -1368,6 +1574,10 @@ class App(tk.Tk):
         self._log(f"  Marcas generadas    : {n_brand}", "info")
         self._log(f"  Ubicaciones         : {n_ubic}", "info")
         self._log(f"  Presentaciones (UNIDAD_MEDIDA): {n_unit_med}", "info")
+        n_attr_vals = len(sheets["ATRIBUTOS_VALUES"])
+        n_variantes = int(sheets["PRODUCTOS DETALLES"]["ATRIBUOS_VALUES_ID"].fillna("").astype(str).str.len().gt(0).sum())
+        self._log(f"  Valores de atributo (ATRIBUTOS_VALUES): {n_attr_vals}", "info")
+        self._log(f"  Variantes (PRODUCTOS DETALLES)       : {n_variantes}", "info")
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         save_path = filedialog.asksaveasfilename(
@@ -1427,9 +1637,9 @@ class App(tk.Tk):
         fr = ttk.Frame(win, padding=(8, 4, 8, 0))
         fr.pack(fill=tk.BOTH, expand=True)
 
-        cols    = ("#", "Código", "Descripción", "Precio (Bs)", "Costo (Bs)", "Marca", "Categoría", "Cant.", "Unid. Alt.")
-        widths  = [38, 90, 240, 88, 88, 110, 100, 55, 70]
-        anchors = ["center", "center", "w", "center", "center", "w", "w", "center", "center"]
+        cols    = ("#", "Código", "Descripción", "Precio (Bs)", "Costo (Bs)", "Marca", "Categoría", "Cant.", "Unid. Alt.", "Variantes")
+        widths  = [38, 90, 240, 88, 88, 110, 100, 55, 70, 70]
+        anchors = ["center", "center", "w", "center", "center", "w", "w", "center", "center", "center"]
 
         tree = ttk.Treeview(fr, columns=cols, show="headings", height=14)
         for c, w, a in zip(cols, widths, anchors):
@@ -1453,6 +1663,7 @@ class App(tk.Tk):
                 cat_name,
                 p.get("cantidad", 1),
                 len(p.get("unidades_alternas", [])),
+                len(p.get("variantes", [])),
             ))
 
         result = [False]
